@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    /* 语言与模块 */
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "preserve",
+
+    /* 类型检查：严格模式 */
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    /* 迁移期：未标注类型的第三方返回值仍允许隐式 any，但显式 any 会被鼓励消除 */
+    "noImplicitAny": true,
+
+    /* 互操作 */
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* 只做类型检查，产物交给 electron-vite (esbuild/rollup) */
+    "noEmit": true,
+    "skipLibCheck": true
+  }
+}

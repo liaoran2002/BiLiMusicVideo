@@ -1,11 +1,16 @@
 .DS_Store
 node_modules
+out
 dist
 release
 __pycache__
 song
 html
 backend
+
+# electron-vite / TS 增量编译缓存
+.npm-cache
+*.tsbuildinfo
 
 .env.local
 .env.*.local

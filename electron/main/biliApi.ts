@@ -1,0 +1,674 @@
+/**
+ * B 站接口封装（主进程）
+ *
+ * 原为 electron/biliApi.js（CommonJS），迁移为 TS 并补上类型。
+ * 逻辑保持与迁移前一致，未做行为改动。
+ */
+import { net, session } from 'electron'
+import crypto from 'node:crypto'
+import {
+  AUDIO_QUALITY_OPTIONS,
+  DEFAULT_AUDIO_ID,
+  DEFAULT_VIDEO_QN,
+  VIDEO_QUALITY_OPTIONS,
+  findQualityOption,
+} from '@common/constants'
+import type { QualityOption } from '@common/constants'
+import type { UserInfo } from '@common/types/ipc'
+
+const SEARCH_API = 'https://api.bilibili.com/x/web-interface/wbi/search/type'
+const NAV_API = 'https://api.bilibili.com/x/web-interface/nav'
+const VIEW_API = 'https://api.bilibili.com/x/web-interface/view'
+const PLAYURL_API = 'https://api.bilibili.com/x/player/wbi/playurl'
+
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+
+const MIXIN_KEY_ENC_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33,
+  9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17,
+  0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+]
+
+/** B 站接口返回体的公共形状（字段很多，只声明用到的） */
+interface BiliResponse {
+  code: number
+  message?: string
+  data?: BiliResponseData
+}
+
+interface BiliPlayUrlItem {
+  url: string
+}
+
+interface BiliResponseData {
+  isLogin?: boolean
+  face?: string
+  uname?: string
+  wbi_img?: { img_url?: string; sub_url?: string }
+  cid?: number
+  durl?: BiliPlayUrlItem[]
+  dash?: { video?: Array<{ baseUrl: string }> }
+  result?: unknown[]
+  [key: string]: unknown
+}
+
+/** 搜索接口用到的参数表（键值都会被拼进 query） */
+type QueryParams = Record<string, string | number>
+
+let cachedMixinKey: string | null = null
+let mixinKeyExpireAt = 0
+let cachedUserInfo: UserInfo | null = null
+
+/**
+ * 登录态（来自 nav 接口的 `isLogin` 字段）
+ *
+ * `null` 表示「还不知道」——和 `false` 区分开：
+ * 登录窗口刚登录完时，任何基于「已知未登录」的缓存判断都会做出错误结论，
+ * 所以拿不准时必须去问一次接口，而不是沿用启动时那份过期的 nav 数据。
+ */
+let loginState: boolean | null = null
+/** 上次成功拉到 nav 数据的时间，用于判断要不要重新确认登录态 */
+let navFetchedAt = 0
+
+/** nav 数据的保鲜期；超过就在需要判断登录态时重新拉一次 */
+const NAV_TTL_MS = 60 * 1000
+
+async function getCookieString(): Promise<string> {
+  try {
+    const cookies = await session.defaultSession.cookies.get({})
+    if (cookies.length === 0) return ''
+    return cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+  } catch {
+    return ''
+  }
+}
+
+const md5 = (str: string): string => crypto.createHash('md5').update(str).digest('hex')
+
+const getMixinKey = (imgKey: string, subKey: string): string => {
+  const raw = imgKey + subKey
+  let result = ''
+  for (let i = 0; i < 32; i++) {
+    result += raw[MIXIN_KEY_ENC_TAB[i]]
+  }
+  return result
+}
+
+async function refreshNavData(): Promise<string | null> {
+  try {
+    const response = await net.fetch(NAV_API, {
+      method: 'GET',
+      headers: {
+        // net.fetch 走的是 electron session，本身就会带上 cookie，
+        // 这里补一个显式 Cookie 头只是为了兼容部分风控场景
+        Cookie: await getCookieString(),
+        'User-Agent': USER_AGENT,
+        Referer: 'https://www.bilibili.com/',
+        Accept: 'application/json',
+      },
+    })
+    const json = (await response.json()) as BiliResponse
+    const imgUrl = json.data?.wbi_img?.img_url ?? ''
+    const subUrl = json.data?.wbi_img?.sub_url ?? ''
+    if (imgUrl && subUrl) {
+      const imgKey = imgUrl.split('/').pop()?.split('.')[0] ?? ''
+      const subKey = subUrl.split('/').pop()?.split('.')[0] ?? ''
+      cachedMixinKey = getMixinKey(imgKey, subKey)
+      mixinKeyExpireAt = Date.now() + 6 * 3600 * 1000
+    }
+    if (json.data?.isLogin) {
+      cachedUserInfo = {
+        face: json.data.face ?? '',
+        name: json.data.uname ?? '',
+      }
+    } else {
+      cachedUserInfo = null
+    }
+    // 以接口返回的 isLogin 为唯一权威（cookie 存在 != 登录有效，可能已过期）
+    loginState = !!json.data?.isLogin
+    navFetchedAt = Date.now()
+    return cachedMixinKey
+  } catch {
+    // 拉取失败时**不改**登录态：宁可保留上一次的结论，也不要被网络抖动带偏
+    return null
+  }
+}
+
+export const clearNavData = (): void => {
+  cachedMixinKey = null
+  mixinKeyExpireAt = 0
+  cachedUserInfo = null
+  loginState = null
+  navFetchedAt = 0
+}
+
+export const isLoggedIn = (): boolean => loginState === true
+
+/**
+ * 确认当前登录态（必要时重新拉 nav）
+ *
+ * 判断「缓存里的播放地址还能不能用」之前必须过这一道：
+ * 登录窗口刚登录完时 nav 缓存还是「未登录」，用旧状态判断会把
+ * 「该重新解析成更高清晰度」误判成「缓存可用」。
+ */
+export const ensureLoginState = async (): Promise<boolean> => {
+  if (loginState !== null && Date.now() - navFetchedAt < NAV_TTL_MS) {
+    return loginState
+  }
+  await refreshNavData()
+  return loginState === true
+}
+
+export const clearMixinKey = (): void => {
+  cachedMixinKey = null
+  mixinKeyExpireAt = 0
+}
+
+const getMixinKeyCached = async (): Promise<string | null> => {
+  if (cachedMixinKey && Date.now() < mixinKeyExpireAt) return cachedMixinKey
+  return refreshNavData()
+}
+
+export const getUserInfo = async (): Promise<UserInfo> => {
+  if (cachedUserInfo) return cachedUserInfo
+  await refreshNavData()
+  if (!cachedUserInfo) throw new Error('未登录')
+  return cachedUserInfo
+}
+
+const encWbi = (params: QueryParams, mixinKey: string): string => {
+  params.wts = Math.floor(Date.now() / 1000)
+  const sorted = Object.keys(params)
+    .sort()
+    .reduce<QueryParams>((acc, key) => {
+      acc[key] = params[key]
+      return acc
+    }, {})
+  const query = Object.entries(sorted)
+    .map(([k, v]) => {
+      const val = String(v).replace(/[!'()*]/g, '')
+      return `${encodeURIComponent(k)}=${encodeURIComponent(val)}`
+    })
+    .join('&')
+  const w_rid = md5(query + mixinKey)
+  return `${query}&w_rid=${w_rid}`
+}
+
+const getQvId = (): string => {
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  let result = ''
+  for (let i = 0; i < 32; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)]
+  }
+  return result
+}
+
+const oldGetW_rid = (params: QueryParams): string => {
+  const paramStr = Object.entries(params)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&')
+  return md5(paramStr + 'ea1db124af3c7062474693fa704f4ff8')
+}
+
+const buildSearchParams = (keyword: string): QueryParams => ({
+  __refresh__: 'true',
+  _extra: '',
+  ad_resource: '5654',
+  category_id: '',
+  context: '',
+  from_source: '',
+  from_spmid: '333.337',
+  gaia_vtoken: '',
+  highlight: '1',
+  keyword,
+  order: '',
+  page_size: '42',
+  platform: 'pc',
+  qv_id: getQvId(),
+  search_type: 'video',
+  single_column: '0',
+  source_tag: '3',
+  web_location: '1430654',
+  wts: Math.floor(Date.now() / 1000).toString(),
+})
+
+async function biliHeaders(): Promise<Record<string, string>> {
+  return {
+    Cookie: await getCookieString(),
+    'User-Agent': USER_AGENT,
+    Referer: 'https://www.bilibili.com/',
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  }
+}
+
+async function biliGet(url: string): Promise<BiliResponse> {
+  const response = await net.fetch(url, {
+    method: 'GET',
+    headers: await biliHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+  return (await response.json()) as BiliResponse
+}
+
+/** 播放地址提前多少毫秒算「即将过期」（留出解析与起播的时间） */
+const URL_EXPIRE_MARGIN_MS = 5 * 60 * 1000
+
+/**
+ * 从 B 站播放地址里解析出过期时间戳（毫秒）
+ *
+ * B 站的视频直链是带签名时效的，常见形态：
+ *   ...?deadline=1789929926&...
+ *   ...?e=ig8eux...&deadline=...      （部分 CDN 把参数塞进 e= 里）
+ * 取不到时返回 null，表示无法判断（按「未知」处理，不当作过期）。
+ */
+export const getUrlDeadline = (url: string | null | undefined): number | null => {
+  if (!url || typeof url !== 'string') return null
+
+  const readFrom = (search: string): number | null => {
+    // deadline 是秒级时间戳
+    const m = /(?:^|[?&])deadline=(\d+)/.exec(search)
+    return m ? Number(m[1]) * 1000 : null
+  }
+
+  try {
+    const parsed = new URL(url)
+    const direct = readFrom(parsed.search)
+    if (direct) return direct
+    // 有些 CDN 把参数整体放在 e= 里面，需要再解一层
+    const e = parsed.searchParams.get('e')
+    if (e) {
+      try {
+        const inner = Buffer.from(decodeURIComponent(e), 'base64').toString('utf8')
+        const nested = readFrom(`?${inner}`)
+        if (nested) return nested
+      } catch {
+        /* 不是 base64 就算了 */
+      }
+    }
+  } catch {
+    /* URL 非法 */
+  }
+  return null
+}
+
+/**
+ * 判断播放地址是否还有效
+ *
+ * @returns true 表示可以继续用；false 表示已过期/即将过期，需要重新解析
+ */
+export const isUrlUsable = (url: string | null | undefined): boolean => {
+  if (!url) return false
+  const deadline = getUrlDeadline(url)
+  if (deadline === null) return true // 拿不到时效信息时保守地认为可用
+  return deadline - Date.now() > URL_EXPIRE_MARGIN_MS
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+export async function searchSong(keyword: string, retryCount = 0): Promise<BiliResponse> {
+  const mixinKey = await getMixinKeyCached()
+
+  if (mixinKey) {
+    const params = buildSearchParams(keyword)
+    params.tids = '3'
+    const query = encWbi(params, mixinKey)
+    const url = `${SEARCH_API}?${query}`
+    try {
+      return await biliGet(url)
+    } catch (innerErr) {
+      clearMixinKey()
+      if (retryCount < 2) {
+        await sleep(1000)
+        return searchSong(keyword, retryCount + 1)
+      }
+      throw innerErr
+    }
+  }
+
+  const params = buildSearchParams(keyword)
+  const w_rid = oldGetW_rid(params)
+  params.tids = '3'
+  params.w_rid = w_rid
+  const queryString = Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&')
+  const url = `${SEARCH_API}?${queryString}`
+
+  try {
+    return await biliGet(url)
+  } catch (err) {
+    if (retryCount < 2) {
+      await sleep(1000)
+      return searchSong(keyword, retryCount + 1)
+    }
+    throw err
+  }
+}
+
+/**
+ * 从 dash 的视频轨里挑一条
+ *
+ * 两条规则：
+ *  1. 优先 H.264（`avc1`）—— MSE 兼容性最好，AV1 / HEVC 在部分机器上
+ *     `MediaSource.isTypeSupported` 会返回 false；
+ *  2. 挑「id 不超过期望档位里最高的那条」；若全都比期望高（比如只有 4K），
+ *     挑最低的那条，别一上来就拉满。
+ */
+const pickDashVideo = (videos: DashItem[], preferred: number): DashItem => {
+  const avc = videos.filter((v) => (v.codecs ?? '').startsWith('avc1'))
+  const pool = avc.length > 0 ? avc : videos
+  const withId = pool.filter((v) => typeof v.id === 'number')
+  if (withId.length === 0) return pool[0]
+
+  const notAbove = withId.filter((v) => (v.id as number) <= preferred)
+  if (notAbove.length > 0) {
+    return notAbove.reduce((a, b) => ((a.id as number) >= (b.id as number) ? a : b))
+  }
+  return withId.reduce((a, b) => ((a.id as number) <= (b.id as number) ? a : b))
+}
+
+/**
+ * 从 dash 的音频轨里挑一条
+ *
+ * 优先 id 完全匹配；没有匹配就挑「带宽不超过期望档位、且最大」的那条，
+ * 免得用户选了 64K 却因为响应里没有 30216 而悄悄拿到 192K。
+ */
+const pickDashAudio = (audios: DashItem[], preferred: number): DashItem => {
+  const exact = audios.find((a) => a.id === preferred)
+  if (exact) return exact
+  const target = findQualityOption(AUDIO_QUALITY_OPTIONS, preferred)
+  const others = audios.filter((a) => typeof a.bandwidth === 'number')
+  if (!target || others.length === 0) return audios[0]
+  // 用内置档位的 id（30280 之类）换算成大致带宽做上界
+  const ceiling = target.id === 30280 ? 200000 : target.id === 30232 ? 140000 : 70000
+  const notAbove = others.filter((a) => (a.bandwidth as number) <= ceiling)
+  if (notAbove.length > 0) {
+    return notAbove.reduce((a, b) => ((a.bandwidth as number) >= (b.bandwidth as number) ? a : b))
+  }
+  return others.reduce((a, b) => ((a.bandwidth as number) <= (b.bandwidth as number) ? a : b))
+}
+
+/** dash 里的一条流（字段名两套，下划线/驼峰都可能出现） */
+interface DashItem {
+  id?: number
+  baseUrl?: string
+  base_url?: string
+  backupUrl?: string[]
+  backup_url?: string[]
+  mimeType?: string
+  mime_type?: string
+  codecs?: string
+  width?: number
+  height?: number
+  bandwidth?: number
+}
+
+/**
+ * dash 双轨信息
+ *
+ * **dash 的视频和音频是两条独立的流**，只给一条就会没有声音，
+ * 所以必须两条一起给出，缺一条就当 dash 不可用。
+ */
+export interface DashStreams {
+  videoUrl: string
+  audioUrl: string
+  /** SourceBuffer 用的 MIME，例如 `video/mp4; codecs="avc1.640032"` */
+  videoMime: string
+  audioMime: string
+  /** dash 总时长（秒）：分片 MP4 的 mvhd 往往是 0，MSE 需要它来补 MediaSource.duration */
+  duration: number | null
+  /** 视频轨清晰度代码，便于排查 */
+  videoId: number | null
+  /** 音频流 id（例如 30280），便于展示 / 切换 */
+  audioId: number | null
+}
+
+export interface ResolveVideoResult {
+  /** 渐进式 mp4（durl）地址；走 dash 时为 null */
+  videoUrl: string | null
+  /** dash 双轨；只有 durl 可用时为 null */
+  dash: DashStreams | null
+  viewData: BiliResponse
+  playData: BiliResponse
+}
+
+const dashUrlOf = (item: DashItem | undefined): string | null => {
+  if (!item) return null
+  const primary = item.baseUrl || item.base_url
+  if (primary) return primary
+  return item.backupUrl?.[0] ?? item.backup_url?.[0] ?? null
+}
+
+const dashMimeOf = (item: DashItem): string | null => {
+  const type = item.mimeType || item.mime_type
+  if (!type) return null
+  return item.codecs ? `${type}; codecs="${item.codecs}"` : type
+}
+
+/**
+ * 从 playurl 响应里取出 dash 双轨
+ *
+ * @param qn      期望视频清晰度（挑不超过它的最高档）
+ * @param audioId 期望音频流 id（挑完全匹配，否则挑不超过它带宽里最高的）
+ */
+export const extractDashStreams = (
+  playData: unknown,
+  qn: number = DEFAULT_VIDEO_QN,
+  audioId: number = DEFAULT_AUDIO_ID,
+): DashStreams | null => {
+  const data = (playData as { data?: Record<string, unknown> } | null | undefined)?.data
+  const dash = data?.dash as
+    | { duration?: number; video?: DashItem[]; audio?: DashItem[] }
+    | undefined
+  const videos = dash?.video
+  const audios = dash?.audio
+  if (!Array.isArray(videos) || videos.length === 0) return null
+  if (!Array.isArray(audios) || audios.length === 0) return null
+
+  const video = pickDashVideo(videos, qn)
+  const audio = pickDashAudio(audios, audioId)
+
+  const videoUrl = dashUrlOf(video)
+  const audioUrl = dashUrlOf(audio)
+  const videoMime = dashMimeOf(video)
+  const audioMime = dashMimeOf(audio)
+  if (!videoUrl || !audioUrl || !videoMime || !audioMime) return null
+
+  return {
+    videoUrl,
+    audioUrl,
+    videoMime,
+    audioMime,
+    duration: typeof dash?.duration === 'number' ? dash.duration : null,
+    videoId: typeof video?.id === 'number' ? video.id : null,
+    audioId: typeof audio?.id === 'number' ? audio.id : null,
+  }
+}
+
+/** 音频轨的展示名：优先查内置档位表，查不到就按带宽凑一个 */
+const audioLabelOf = (item: DashItem): string => {
+  const known = typeof item.id === 'number' ? findQualityOption(AUDIO_QUALITY_OPTIONS, item.id) : undefined
+  if (known) return known.label
+  if (typeof item.bandwidth === 'number' && item.bandwidth > 0) {
+    return `${Math.round(item.bandwidth / 1000)}K`
+  }
+  return typeof item.id === 'number' ? String(item.id) : '未知'
+}
+
+/**
+ * 读出「这个视频当前可选的清晰度 / 音质」
+ *
+ * **只列响应里真正能拿到的档位**，不铺静态全表：
+ *  - 有 dash 时以 `dash.video[]` 为准 —— 那才是实际能播的流；
+ *    `accept_quality` 只能说明账号有权限，durl 通道会给不了（实测它列出 1080P 却只回 720P）；
+ *  - 没有 dash（durl 兜底）时才退回 `accept_quality`；
+ *  - 音质来自 `dash.audio[]`。
+ * 展示名一律取 `support_formats` 的官方文案，取不到再退回内置档位表。
+ *
+ * 注意：这里**不按设置里的上限裁剪**。
+ * 设置页那个上限管的是「自动播放时最高选到哪一档」，
+ * 而这个菜单是用户手动临时切换用的，得能看到全部可用档位。
+ */
+export const readQualityOptions = (
+  playData: unknown,
+): { video: QualityOption[]; audio: QualityOption[] } | null => {
+  const data = (playData as { data?: Record<string, unknown> } | null | undefined)?.data
+  if (!data) return null
+
+  const formats = Array.isArray(data.support_formats)
+    ? (data.support_formats as Array<{
+        quality?: number
+        display_desc?: string
+        new_description?: string
+      }>)
+    : []
+  const accept = Array.isArray(data.accept_quality)
+    ? (data.accept_quality as number[]).filter((q) => typeof q === 'number')
+    : []
+  const dash = data.dash as { video?: DashItem[]; audio?: DashItem[] } | undefined
+  const dashVideoIds = Array.isArray(dash?.video)
+    ? dash.video.map((v) => v.id).filter((id): id is number => typeof id === 'number')
+    : []
+
+  const videoIds = dashVideoIds.length > 0 ? dashVideoIds : accept
+  const video: QualityOption[] = videoIds
+    .map((id) => {
+      const hit = formats.find((f) => f.quality === id)
+      const known = findQualityOption(VIDEO_QUALITY_OPTIONS, id)
+      const label =
+        (typeof hit?.display_desc === 'string' && hit.display_desc) || known?.label || String(id)
+      const description =
+        (typeof hit?.new_description === 'string' && hit.new_description) ||
+        known?.description ||
+        label
+      return { id, label, description }
+    })
+    // 去重后按档位从高到低
+    .filter((o, i, arr) => arr.findIndex((x) => x.id === o.id) === i)
+    .sort((a, b) => b.id - a.id)
+
+  const audio: QualityOption[] = Array.isArray(dash?.audio)
+    ? dash.audio
+        .filter((a) => typeof a.id === 'number')
+        .map((a) => {
+          const known = findQualityOption(AUDIO_QUALITY_OPTIONS, a.id as number)
+          const label = audioLabelOf(a)
+          return {
+            id: a.id as number,
+            label,
+            description: known?.description ?? `${label} 音质`,
+          }
+        })
+        .sort((a, b) => b.id - a.id)
+    : []
+
+  if (video.length === 0 && audio.length === 0) return null
+  return { video, audio }
+}
+
+/**
+ * 请求 playurl：先用 wbi 签名接口，失败再退回老接口
+ *
+ * @returns code 为 0 的响应；两个接口都没给出数据时返回 null
+ * @throws Error('AUTH_FAILED') 未登录 / 权限不足（调用方需要提示重新登录）
+ */
+const requestPlayUrl = async (
+  bvid: string,
+  cid: number,
+  mixinKey: string | null,
+  extra: QueryParams,
+): Promise<BiliResponse | null> => {
+  const params: QueryParams = { bvid, cid, fnver: 0, fourk: 1, ...extra }
+
+  if (mixinKey) {
+    try {
+      const query = encWbi({ ...params }, mixinKey)
+      const res = await biliGet(`${PLAYURL_API}?${query}`)
+      if (res.code === 0) return res
+      if (res.code === -101 || res.code === -403) throw new Error('AUTH_FAILED')
+    } catch (err) {
+      if (err instanceof Error && err.message === 'AUTH_FAILED') throw err
+      // 签名失效：清掉 mixin key，让下次重新拉
+      clearMixinKey()
+    }
+  }
+
+  const legacy: QueryParams = { ...params }
+  legacy.w_rid = oldGetW_rid(legacy)
+  const qs = Object.entries(legacy)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&')
+  const res2 = await biliGet(`https://api.bilibili.com/x/player/playurl?${qs}`)
+  if (res2.code !== 0) {
+    if (res2.code === -101 || res2.code === -403) throw new Error('AUTH_FAILED')
+    return null
+  }
+  return res2
+}
+
+/** 从响应里取第一条 durl 地址 */
+const firstDurl = (res: BiliResponse | null): string | null => {
+  const durl = (res?.data as { durl?: Array<{ url?: string }> } | undefined)?.durl
+  const url = durl?.[0]?.url
+  return typeof url === 'string' && url ? url : null
+}
+
+export async function resolveVideoUrl(
+  bvid: string,
+  options: { noDash?: boolean; qn?: number; audioId?: number } = {},
+): Promise<ResolveVideoResult> {
+  const qn = options.qn ?? DEFAULT_VIDEO_QN
+  const audioId = options.audioId ?? DEFAULT_AUDIO_ID
+  const viewData = await biliGet(`${VIEW_API}?bvid=${bvid}`)
+  if (viewData.code !== 0) {
+    throw new Error(viewData.message ?? '获取视频信息失败')
+  }
+  const cid = viewData.data?.cid
+  if (!cid) {
+    throw new Error('无法获取视频CID')
+  }
+
+  const mixinKey = await getMixinKeyCached()
+
+  /**
+   * 优先 dash。
+   *
+   * 实测 `fnval: 1`（渐进式 mp4 / durl）**这条通道封顶 720P** ——
+   * 请求 qn 填 80 / 116 / 120 都一样，`quality` 恒定回 64。
+   * 1080P / 4K 只存在于 dash 里（视频轨 `id: 80` = 1920x1080），
+   * 而 dash 的音视频是分开的，需要渲染层用 MSE 合成。
+   */
+  if (!options.noDash) {
+    const dashData = await requestPlayUrl(bvid, cid, mixinKey, {
+      qn,
+      fnval: 16,
+    }).catch((err) => {
+      // dash 这一路失败不致命，交给下面的 durl 兜底；只有鉴权问题才向上抛
+      if (err instanceof Error && err.message === 'AUTH_FAILED') throw err
+      console.warn('[video] dash 请求失败，退回 durl：', err)
+      return null
+    })
+    const dash = extractDashStreams(dashData, qn, audioId)
+    if (dash && dashData) {
+      return { videoUrl: null, dash, viewData, playData: dashData }
+    }
+  }
+
+  // durl 兜底（720P，音视频混流，拖动进度最省事）
+  const durlData = await requestPlayUrl(bvid, cid, mixinKey, {
+    qn: 80,
+    fnval: 1,
+    platform: 'html5',
+    high_quality: 1,
+  })
+  const durl = firstDurl(durlData)
+  if (durl && durlData) {
+    return { videoUrl: durl, dash: null, viewData, playData: durlData }
+  }
+
+  throw new Error('无法获取视频地址')
+}

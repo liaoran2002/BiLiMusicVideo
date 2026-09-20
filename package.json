@@ -1,40 +1,53 @@
 {
-  "name": "BiLiSongVideo-desktop",
+  "name": "BiLiMusicVideo-desktop",
   "version": "1.5.0",
   "author": "liaoran2002",
   "description": "基于 Electron + Vue 3 构建的 B站音乐视频播放器,支持歌单自动播放和桌面壁纸模式。",
-  "main": "electron/main.js",
+  "main": "./out/main/index.js",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"vite\" \"electron .\"",
-    "wallDev": "concurrently \"vite\" \"electron . --wallpaper-mode\"",
-    "build": "vite build",
-    "preview": "vite preview",
-    "pack": "vite build && electron-builder --dir",
-    "dist": "vite build && electron-builder"
+    "dev": "electron-vite dev",
+    "dev:wall": "electron-vite dev -- --wallpaper-mode",
+    "build": "npm run typecheck && electron-vite build",
+    "build:only": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "pack": "npm run build:only && electron-builder --dir",
+    "dist": "npm run build:only && electron-builder",
+    "test:setting": "node .tmp-test/build-test.mjs && electron .tmp-test/setting-test.cjs"
   },
   "dependencies": {
     "electron-as-wallpaper": "^2.0.3",
     "element-plus": "^2.14.2",
+    "koffi": "^2.9.0",
+    "pinia": "^3.0.4",
     "vue": "^3.5.38"
   },
   "devDependencies": {
+    "@types/node": "^22.20.4",
     "@vitejs/plugin-vue": "^6.0.7",
-    "concurrently": "^10.0.3",
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
-    "vite": "^8.0.16"
+    "electron-vite": "^6.0.0-beta.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.16",
+    "vue-tsc": "^3.3.11"
   },
   "build": {
-    "appId": "com.bilibili.songvideo",
-    "productName": "BLSV",
+    "appId": "com.bilibili.musicvideo",
+    "productName": "BLMV",
     "directories": {
       "output": "release"
     },
     "files": [
-      "dist/**/*",
-      "electron/**/*",
+      "out/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/electron-as-wallpaper/**",
+      "**/node_modules/koffi/**"
     ],
     "win": {
       "target": [
@@ -49,19 +62,16 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "msi",
-          "arch": [
-            "x64"
-          ]
         }
       ],
       "icon": "public/bili.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "removeDefaultUninstallWelcomePage": false,
+      "deleteAppDataOnUninstall": true
     }
   }
 }

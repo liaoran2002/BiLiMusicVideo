@@ -1,0 +1,137 @@
+/**
+ * preload
+ *
+ * 手写 preload：在 contextIsolation 开启的前提下，通过 contextBridge
+ * 把主题化、类型化的 api 暴露到 window.electronAPI。
+ *
+ * 类型链路：
+ *   electron/common/types/ipc.ts 的 IpcChannelMap
+ *     -> rendererInvoke / rendererOn 自动推导出入参与返回值
+ *     -> electron/preload/index.d.ts 扩展 window
+ *     -> 渲染进程调用 window.electronAPI.xxx 时自动获得 TS 提示
+ *
+ * 因此渲染进程侧不再需要手写一层 any 转发（见 src/api/electron.ts）。
+ */
+import { contextBridge } from 'electron'
+import { rendererInvoke, rendererOn } from '@common/rendererIpc'
+import type {
+  AppSetting,
+  DragOffset,
+  IpcChannelMap,
+  Playlist,
+  RemoveListener,
+  TrayState,
+  UserInfo,
+} from '@common/types/ipc'
+import type { RendererAPI, ScreenWorkArea } from '@common/types/api'
+import type { GetPlaylistDetailParams, PlaylistDetail } from '@common/types/musicSdk'
+import type {
+  PlaylistSaveParams,
+  PlaylistStoreData,
+  SyncResult,
+} from '@common/types/playlist'
+import type { CacheStats } from '@common/types/cache_stats'
+
+/** 暴露给渲染进程的 api：每个方法都从 IpcChannelMap 推导出入参与返回值 */
+const api = {
+  // #region 配置（主进程接管，渲染进程只拿副本）
+  getSetting: (): Promise<AppSetting> => rendererInvoke('setting:get'),
+  updateSetting: (partial: Partial<AppSetting>): Promise<AppSetting> =>
+    rendererInvoke('setting:update', partial),
+  resetSetting: (): Promise<AppSetting> => rendererInvoke('setting:reset'),
+  /** 监听配置更新广播（多窗口同步） */
+  onSettingUpdate: (cb: (setting: Partial<AppSetting>) => void): RemoveListener =>
+    rendererOn('setting:update', cb),
+  // #endregion
+
+  // #region 登录
+  startLogin: (): Promise<void> => rendererInvoke('auth:startLogin'),
+  reLogin: (): Promise<void> => rendererInvoke('auth:reLogin'),
+  setLoggedIn: (loggedIn: boolean): Promise<void> =>
+    rendererInvoke('auth:setLoggedIn', { loggedIn }),
+  executeLogout: (): Promise<void> => rendererInvoke('auth:executeLogout'),
+  onLogout: (cb: () => void): RemoveListener => rendererOn('auth:logout', cb),
+  onLoginSuccess: (cb: () => void): RemoveListener => rendererOn('auth:loginSuccess', cb),
+  // #endregion
+
+  // #region 托盘
+  trayUpdateState: (state: TrayState): Promise<void> =>
+    rendererInvoke('tray:updateState', state),
+  onTrayPlayControl: (cb: () => void): RemoveListener => rendererOn('tray:playControl', cb),
+  onTrayPrev: (cb: () => void): RemoveListener => rendererOn('tray:prev', cb),
+  onTrayNext: (cb: () => void): RemoveListener => rendererOn('tray:next', cb),
+  onTrayToggleMode: (cb: () => void): RemoveListener => rendererOn('tray:toggleMode', cb),
+  onTrayShowPlaylist: (cb: () => void): RemoveListener => rendererOn('tray:showPlaylist', cb),
+  onTrayShowLogoutConfirm: (cb: () => void): RemoveListener =>
+    rendererOn('tray:showLogoutConfirm', cb),
+  // #endregion
+
+  // #region B 站接口
+  getUserInfo: (): Promise<UserInfo> => rendererInvoke('api:getUserInfo'),
+  searchSong: (keyword: string): Promise<{ data: unknown }> =>
+    rendererInvoke('api:searchSong', { keyword }),
+  resolveVideoUrl: (
+    bvid: string,
+    keyword?: string,
+    skipCache?: boolean,
+    noDash?: boolean,
+    qn?: number,
+    audioId?: number,
+  ): Promise<IpcChannelMap['api:resolveVideo']['result']> =>
+    rendererInvoke('api:resolveVideo', { bvid, keyword, skipCache, noDash, qn, audioId }),
+  /** 解析各大音乐平台的歌单分享链接（网易云 / QQ音乐 / 酷我音乐） */
+  getPlaylistDetail: (params: GetPlaylistDetailParams): Promise<PlaylistDetail> =>
+    rendererInvoke('music:getPlaylistDetail', params),
+  // #endregion
+
+  // #region 歌单 / 缓存
+  getPlaylist: (): Promise<Playlist | null> => rendererInvoke('playlist:get'),
+  savePlaylist: (data: Playlist): Promise<boolean> => rendererInvoke('playlist:save', data),
+  /** 歌单集合（多歌单） */
+  getPlaylists: (): Promise<PlaylistStoreData> => rendererInvoke('playlists:get'),
+  savePlaylists: (params: PlaylistSaveParams): Promise<PlaylistStoreData> =>
+    rendererInvoke('playlists:save', params),
+  syncPlaylists: (ids: string[]): Promise<SyncResult[]> =>
+    rendererInvoke('playlists:sync', { ids }),
+  clearCache: (): Promise<boolean> => rendererInvoke('cache:clearAll'),
+  clearSingleCache: (keyword: string): Promise<boolean> =>
+    rendererInvoke('cache:clearSingle', { keyword }),
+  getCacheStats: (): Promise<CacheStats> => rendererInvoke('cache:getStats'),
+  pruneCache: (): Promise<CacheStats> => rendererInvoke('cache:prune'),
+  // #endregion
+
+  // #region 窗口
+  winMinimize: (): Promise<void> => rendererInvoke('win:minimize'),
+  winMaximize: (): Promise<void> => rendererInvoke('win:maximize'),
+  winClose: (): Promise<void> => rendererInvoke('win:close'),
+  winIsMaximized: (): Promise<boolean> => rendererInvoke('win:isMaximized'),
+  winToggleFullscreen: (): Promise<boolean> => rendererInvoke('win:toggleFullscreen'),
+  winIsFullscreen: (): Promise<boolean> => rendererInvoke('win:isFullscreen'),
+  winStartDrag: (): Promise<DragOffset | null> => rendererInvoke('win:startDrag'),
+  winMoveWindow: (x: number, y: number): Promise<void> =>
+    rendererInvoke('win:moveWindow', { x, y }),
+  winGetScreenWorkArea: (): Promise<ScreenWorkArea | null> =>
+    rendererInvoke('win:getScreenWorkArea'),
+  onMaximized: (cb: (val: boolean) => void): RemoveListener => rendererOn('window:maximized', cb),
+  onFullscreen: (cb: (val: boolean) => void): RemoveListener =>
+    rendererOn('window:fullscreen', cb),
+  // #endregion
+
+  // #region 壁纸
+  wallpaperToggle: (): Promise<boolean> => rendererInvoke('wallpaper:toggle'),
+  wallpaperIsEnabled: (): Promise<boolean> => rendererInvoke('wallpaper:isEnabled'),
+  onWallpaperState: (cb: (enabled: boolean) => void): RemoveListener =>
+    rendererOn('wallpaper:state', cb),
+  // #endregion
+} as const satisfies RendererAPI
+
+/**
+ * preload 对外暴露的 api 类型
+ *
+ * `satisfies RendererAPI` 让 TS 校验这里的实现与契约完全一致：
+ * 少一个方法、多一个方法、参数或返回值写错，都会在编译期报错。
+ */
+export type ElectronAPI = typeof api
+
+// contextIsolation 开启时这是唯一的安全通道
+contextBridge.exposeInMainWorld('electronAPI', api)
