@@ -35,33 +35,25 @@ export const usePlaylistStore = defineStore('playlists', () => {
   const loaded = ref(false)
   /** 正在同步的歌单 id 集合 */
   const syncing = ref<string[]>([])
-  /** 上次同步结果（用于界面提示） */
-  const lastSyncResults = ref<SyncResult[]>([])
-
-  let loadPromise: Promise<void> | null = null
 
   const current = computed<PlaylistRecord | null>(
     () => playlists.value.find((p) => p.id === currentId.value) ?? null,
   )
-  const currentSongs = computed<PlaylistSong[]>(() => current.value?.songs ?? [])
 
   const isSyncing = computed(() => syncing.value.length > 0)
   const isSyncingOne = (id: string): boolean => syncing.value.includes(id)
 
-  /** 从主进程加载集合 */
+  /**
+   * 从主进程加载集合
+   *
+   * 只有 `src/App.vue` 的 init 会调用它（而且是 await 的），
+   * 所以不需要「幂等 ensureLoaded + 复用同一个 promise」那层包装 —— 已删。
+   */
   const load = async (): Promise<void> => {
     const data: PlaylistStoreData = await api.getPlaylists()
     playlists.value = data.playlists
     currentId.value = data.currentId
     loaded.value = true
-  }
-
-  const ensureLoaded = async (): Promise<void> => {
-    if (loaded.value) return
-    loadPromise ??= load().finally(() => {
-      loadPromise = null
-    })
-    await loadPromise
   }
 
   /** 整体写回主进程 */
@@ -184,7 +176,6 @@ export const usePlaylistStore = defineStore('playlists', () => {
     syncing.value = [...new Set([...syncing.value, ...targetIds])]
     try {
       const results = await api.syncPlaylists(targetIds)
-      lastSyncResults.value = results
       // 同步会改歌曲列表，重新拉一次以拿到最新数据
       await load()
       return results
@@ -236,26 +227,15 @@ export const usePlaylistStore = defineStore('playlists', () => {
       .map((p) => getSyncInterval(p))
     return list.length > 0 ? Math.min(...list) : 0
   })
-
-  /** 跑一轮定时同步（只同步到点的） */
-  const runDueSyncs = async (): Promise<SyncResult[]> => {
-    const ids = getDueSyncIds()
-    if (ids.length === 0) return []
-    return sync(ids)
-  }
-
   return {
     playlists,
     currentId,
     loaded,
     syncing,
-    lastSyncResults,
     current,
-    currentSongs,
     isSyncing,
     isSyncingOne,
     load,
-    ensureLoaded,
     persist,
     addPlaylist,
     updatePlaylist,
@@ -272,6 +252,5 @@ export const usePlaylistStore = defineStore('playlists', () => {
     hasIntervalSync,
     minSyncInterval,
     getDueSyncIds,
-    runDueSyncs,
   }
 })

@@ -1,10 +1,13 @@
-import { createApp } from 'vue'
+import { createApp, watch } from 'vue'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// Element Plus 的暗色变量：挂在 html.dark 上，切主题时由 applyUiTheme 控制
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 import './assets/iconfont/iconfont.css'
 import { useSettingStore } from './stores/setting'
+import { applyUiThemeFromSetting } from './utils/uiTheme'
 
 const app = createApp(App)
 
@@ -26,6 +29,19 @@ const bootstrap = async (): Promise<void> => {
   } catch (err) {
     console.error('[bootstrap] load setting failed, fallback to defaults:', err)
   }
+  // 界面颜色 / 毛玻璃参数跟着配置走（含后续广播过来的修改）。
+  // 放在 mount 之前应用一次，避免先按默认色渲染再跳一下的闪烁。
+  watch(
+    () => [
+      settingStore.setting['common.themeColor'],
+      settingStore.setting['common.fontColor'],
+      settingStore.setting['common.glassTransparency'],
+      settingStore.setting['common.glassBlur'],
+      settingStore.setting['common.glassShadow'],
+    ],
+    () => applyUiThemeFromSetting(settingStore.setting),
+    { immediate: true },
+  )
   app.mount('#app')
 }
 

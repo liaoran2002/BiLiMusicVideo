@@ -11,6 +11,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   session,
   screen,
   Tray,
@@ -18,6 +19,7 @@ import {
   nativeImage,
 } from 'electron'
 import path from 'node:path'
+import fs from 'node:fs'
 import { registerIpcHandlers } from './ipcHandlers'
 import { setupUserDataPath, isPortable } from './portable'
 import {
@@ -30,6 +32,7 @@ import {
 import * as biliApi from './biliApi'
 import { initPlaylists, flushPlaylists } from './utils/playlist'
 import { PLAY_LOOP_MODES } from '@common/constants'
+import type { IpcEvent, IpcEventPayload } from '@common/types/ipc'
 
 // electron-as-wallpaper 是原生模块，且只在 Windows 有意义，加载失败不应该影响主功能
 type AsWallpaper = typeof import('electron-as-wallpaper')
@@ -93,11 +96,34 @@ let wallpaperRestore: WallpaperRestore | null = null
 
 app.commandLine.appendSwitch('force-device-scale-factor', '1')
 
-/** 统一的资源路径解析：开发期读 public/，打包后读 out/ */
-const resolveAsset = (file: string): string =>
-  isDev
-    ? path.join(app.getAppPath(), 'public', file)
-    : path.join(app.getAppPath(), file)
+/**
+ * 资源路径解析（窗口图标 / 托盘图标）
+ *
+ * 同一个文件在三种环境里位置不同，所以要按顺序找，不能只拼一个路径：
+ *  1. 打包后：`extraResources` 把 public/ 里的图标放到了 resources/icons（**不在 asar 里**，
+ *     真实文件路径，nativeImage 读起来最稳）；
+ *  2. 开发期：项目根目录的 public/；
+ *  3. 兜底：renderer 产物里的同名文件（Vite 会把 public/ 整个拷到 out/renderer/）。
+ *
+ * 等等：以前这里打包后直接拼的是 `app.getAppPath()/bili.ico`（也就是 resources/app.asar/bili.ico），
+ * 那个路径根本不存在 —— 表现就是「portable 版托盘没图标、窗口图标也是空的」。
+ */
+const resolveAsset = (file: string): string => {
+  const candidates = [
+    path.join(process.resourcesPath, 'icons', file),
+    path.join(app.getAppPath(), 'public', file),
+    path.join(__dirname, '..', 'renderer', file),
+  ]
+  return candidates.find((p) => fs.existsSync(p)) ?? candidates[0]
+}
+
+/** 读图标：找不到 / 解不出来都要留一条日志，别静默变成空白图标 */
+const loadIcon = (file: string): Electron.NativeImage => {
+  const iconPath = resolveAsset(file)
+  const icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) console.warn('[icon] 图标加载失败（会是空白图标）:', iconPath)
+  return icon
+}
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -109,7 +135,7 @@ function createMainWindow(): void {
     frame: false,
     center: true,
     transparent: true,
-    icon: resolveAsset('bili.ico'),
+    icon: loadIcon('bili.ico'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       // contextIsolation 必须保持开启：preload 通过 contextBridge 暴露类型化 api，
@@ -127,6 +153,24 @@ function createMainWindow(): void {
     void mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
   mainWindow.setAspectRatio(FULLSCREEN_ASPECT)
+
+  /**
+   * 导航护栏：只允许留在我们自己的页面上。
+   *
+   * preload 会附加到主窗口的每一次导航上，一旦被导航到站外（比如以后谁加了个外链跳转），
+   * 那个源就能直接拿到整套 `electronAPI`（改配置、退登录、关窗口、开外链），
+   * 而渲染层现在没有任何站外跳转需求 —— 打开外链一律走 `app:openExternal`。
+   */
+  const appOrigin =
+    isDev && process.env.ELECTRON_RENDERER_URL ? process.env.ELECTRON_RENDERER_URL : 'file://'
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith(appOrigin)) {
+      event.preventDefault()
+      console.warn('[win] 已拦截站外导航:', url)
+    }
+  })
+  // 不允许弹出新窗口（外链走系统浏览器）
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow) return
@@ -172,10 +216,16 @@ function createMainWindow(): void {
   })
 }
 
-/** 向主窗口发送广播（窗口不存在时静默忽略） */
-function sendToMain(channel: string, payload?: unknown): void {
+/**
+ * 向主窗口发送广播（窗口不存在时静默忽略）
+ *
+ * 用 `mainSend` 的类型化签名 + `BROADCAST_EVENT_NAME` 里的常量：
+ * 以前这里是 `channel: string`，主进程各处直接写裸字符串（`'tray:prev'` 之类），
+ * 打错一个字母不报错，渲染层就永远收不到。
+ */
+function sendToMain<E extends IpcEvent>(event: E, payload?: IpcEventPayload<E>): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, payload)
+    mainWindow.webContents.send(event, payload)
   }
 }
 
@@ -197,13 +247,14 @@ const readNormalWindowState = (): FullScreenRestore => {
   }
 }
 
-/** 把窗口撑满主屏（全屏的几何部分） */
+/** 把窗口撑满它当前所在的那块屏（全屏的几何部分） */
 const applyFullScreenGeometry = (): void => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   // 16:9 的宽高比约束会把 setBounds 的结果改写掉，全屏时必须先解除，
   // 否则在非 16:9 的显示器上窗口撑不满，看起来就「没全屏」
   mainWindow.setAspectRatio(0)
-  mainWindow.setBounds(screen.getPrimaryDisplay().bounds)
+  // 必须按「窗口现在在哪块屏」算，写死 getPrimaryDisplay() 会把副屏上的窗口拽回主屏
+  mainWindow.setBounds(screen.getDisplayMatching(mainWindow.getBounds()).bounds)
   // 不置顶的话任务栏会压在窗口上面，看起来也不像全屏
   mainWindow.setAlwaysOnTop(true)
 }
@@ -465,32 +516,45 @@ function createLoginWindow(): void {
    * 之所以不能只靠 `did-navigate`：B 站登录可能走 SPA 内部跳转，
    * 用户也可能登录完直接手动关窗 —— 这两条路都触发不了导航事件，
    * 于是「登录成功」没人告诉主进程，必须重启一次才生效。
+   *
+   * 轮询（1s）和 `did-navigate` 都会调它，函数里又有两个 await，
+   * 所以必须加 in-flight 标记：否则两次调用会一起越过上面的判断，
+   * `auth:loginSuccess` 发两遍，渲染层跟着把同一个视频重复解析两次。
    */
+  let finishingLogin = false
+  let loginFinished = false
   const finishLoginIfReady = async (): Promise<boolean> => {
+    if (loginFinished || finishingLogin) return loginFinished
     if (initialSessdata === null) return false
     const sessdata = await readSessdata()
     if (!sessdata || sessdata === initialSessdata) return false
 
-    // 丢掉「未登录时」拿到的 nav / wbi / 用户信息缓存，
-    // 否则 isLoggedIn() 还是 false，解析播放地址时仍按未登录处理
-    biliApi.clearNavData()
-    const ok = await biliApi.ensureLoginState()
-    if (!ok) return false
+    finishingLogin = true
+    try {
+      // 丢掉「未登录时」拿到的 nav / wbi / 用户信息缓存，
+      // 否则 isLoggedIn() 还是 false，解析播放地址时仍按未登录处理
+      biliApi.clearNavData()
+      const ok = await biliApi.ensureLoginState()
+      if (!ok) return false
 
-    if (loginPollTimer) {
-      clearInterval(loginPollTimer)
-      loginPollTimer = null
+      loginFinished = true
+      if (loginPollTimer) {
+        clearInterval(loginPollTimer)
+        loginPollTimer = null
+      }
+      if (loginAutoCloseTimer) {
+        clearTimeout(loginAutoCloseTimer)
+        loginAutoCloseTimer = null
+      }
+      if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close()
+      loginWindow = null
+      isLoggedIn = true
+      buildTrayMenu()
+      sendToMain('auth:loginSuccess')
+      return true
+    } finally {
+      finishingLogin = false
     }
-    if (loginAutoCloseTimer) {
-      clearTimeout(loginAutoCloseTimer)
-      loginAutoCloseTimer = null
-    }
-    if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close()
-    loginWindow = null
-    isLoggedIn = true
-    buildTrayMenu()
-    sendToMain('auth:loginSuccess')
-    return true
   }
 
   // 登录页可能不触发顶层导航，轮询 cookie 兜底
@@ -504,7 +568,15 @@ function createLoginWindow(): void {
 
   loginWindow.webContents.on('dom-ready', () => {
     if (!loginWindow || loginWindow.isDestroyed()) return
-    void loginWindow.webContents.insertCSS(`
+    // dom-ready 每次主框架导航都会触发（登录成功后 B 站自己就会跳一次），
+    // 不判重就会叠出好几个关闭按钮和倒计时（文字重影）
+    void loginWindow.webContents
+      .executeJavaScript(
+        `!document.querySelector('.mimo-close-btn') && !document.querySelector('.mimo-countdown')`,
+      )
+      .then(async (clean: boolean) => {
+        if (!clean || !loginWindow || loginWindow.isDestroyed()) return
+        await loginWindow.webContents.insertCSS(`
       .mimo-close-btn {
         position: fixed; top: 0; right: 0; z-index: 99999;
         width: 36px; height: 36px;
@@ -522,7 +594,8 @@ function createLoginWindow(): void {
         font-family: system-ui, sans-serif;
       }
     `)
-    void loginWindow.webContents.executeJavaScript(`
+        if (!loginWindow || loginWindow.isDestroyed()) return
+        await loginWindow.webContents.executeJavaScript(`
       ${
         !isLoginWallpaper
           ? `
@@ -551,6 +624,7 @@ function createLoginWindow(): void {
           : ''
       }
     `)
+      })
   })
 
   loginWindow.on('closed', () => {
@@ -569,7 +643,7 @@ function createLoginWindow(): void {
 }
 
 function buildTrayMenu(): void {
-  const send = (channel: string): void => sendToMain(channel)
+  const send = (event: IpcEvent): void => sendToMain(event)
   const template: Electron.MenuItemConstructorOptions[] = [
     {
       label: isPaused ? '播放' : '暂停',
@@ -621,7 +695,7 @@ function buildTrayMenu(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(resolveAsset('bili.ico'))
+  const icon = loadIcon('bili.ico')
   tray = new Tray(icon)
   tray.setToolTip('B站音乐视频')
   tray.on('click', () => {
@@ -714,6 +788,14 @@ void app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['*://*.bilivideo.com/*', '*://*.bilibili.com/*'] },
     (details, callback) => {
+      /**
+       * 登录窗口自己的请求不能改 Referer：`passport.bilibili.com` 也匹配上面的规则，
+       * 给登录页的 XHR 塞一个 www.bilibili.com 的 Referer 有可能被风控当成异常来源。
+       */
+      if (details.webContentsId != null && details.webContentsId === loginWindow?.webContents.id) {
+        callback({ requestHeaders: details.requestHeaders })
+        return
+      }
       details.requestHeaders['Referer'] = 'https://www.bilibili.com/'
       callback({ requestHeaders: details.requestHeaders })
     },
@@ -752,10 +834,32 @@ void app.whenReady().then(async () => {
   createMainWindow()
   createTray()
 
+  // 第 5 步：显示器变化（拔屏 / 改分辨率）时重算全屏与壁纸的几何
+  watchDisplayChanges()
+
   void grabCookiesSilently()
 
   console.log(`[main] ready (dev=${String(isDev)}, portable=${String(isPortable())})`)
 })
+  /**
+   * 启动失败要留个痕迹并退出。
+   *
+   * 以前这里是裸的 `void app.whenReady().then(...)`：`initSetting` / `initPlaylists`
+   * 万一因为磁盘只读、JSON 异常抛错，进程会静默留在「没有窗口」的状态，
+   * 用户只看到双击没反应。
+   */
+  .catch((err: unknown) => {
+    console.error('[main] 启动失败:', err)
+    try {
+      dialog.showErrorBox(
+        '启动失败',
+        `应用初始化时出错，即将退出。\n\n${err instanceof Error ? err.message : String(err)}`,
+      )
+    } catch {
+      /* 弹窗失败就只留日志 */
+    }
+    app.exit(1)
+  })
 
 /** 拖动窗口：处理全屏/最大化状态下先还原再跟手移动 */
 function startWindowDrag(): { offsetX: number; offsetY: number } | null {
@@ -766,8 +870,12 @@ function startWindowDrag(): { offsetX: number; offsetY: number } | null {
     // 全屏时拖动 = 退出全屏，并按鼠标在窗口中的相对位置把窗口摆到鼠标下
     const fullBounds = mainWindow.getBounds()
     const normalBounds = fullScreenRestore?.bounds ?? fullBounds
-    const ratioX = fullBounds.width > 0 ? cursor.x / fullBounds.width : 0.5
-    const ratioY = fullBounds.height > 0 ? cursor.y / fullBounds.height : 0.5
+    // 注意减掉 fullBounds.x/y：全屏窗口不一定从 (0,0) 开始（副屏 / 多屏），
+    // 不减的话相对位置会大于 1，还原出来的窗口直接飞出屏幕
+    const ratioX =
+      fullBounds.width > 0 ? (cursor.x - fullBounds.x) / fullBounds.width : 0.5
+    const ratioY =
+      fullBounds.height > 0 ? (cursor.y - fullBounds.y) / fullBounds.height : 0.5
     isFullScreen = false
     fullScreenRestore = null
     mainWindow.setAlwaysOnTop(false)
@@ -784,8 +892,10 @@ function startWindowDrag(): { offsetX: number; offsetY: number } | null {
   if (mainWindow.isMaximized()) {
     const fullBounds = mainWindow.getBounds()
     const normalBounds = mainWindow.getNormalBounds()
-    const ratioX = cursor.x / fullBounds.width
-    const ratioY = cursor.y / fullBounds.height
+    const ratioX =
+      fullBounds.width > 0 ? (cursor.x - fullBounds.x) / fullBounds.width : 0.5
+    const ratioY =
+      fullBounds.height > 0 ? (cursor.y - fullBounds.y) / fullBounds.height : 0.5
     mainWindow.unmaximize()
     mainWindow.setBounds({
       x: Math.round(cursor.x - ratioX * normalBounds.width),
@@ -814,6 +924,36 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (!mainWindow) createMainWindow()
 })
+
+/**
+ * 显示器变化（拔屏 / 改分辨率 / 改缩放）后，全屏与壁纸的几何是按进入时的屏幕算的，
+ * 不重算就会停在旧 bounds 上（甚至落在已经拔掉的显示器坐标里）。
+ * 这里只处理「正在全屏 / 壁纸」的情况：普通窗口交给 Windows 自己钳制，别乱动用户摆好的位置。
+ */
+const handleDisplayChange = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!isFullScreen && !wallpaperEnabled) return
+  try {
+    // 两种情况都是「窗口应该铺满所在屏幕」，所以同一个几何函数；
+    // 壁纸模式下不需要重新 attach（窗口已经贴在桌面层，只是尺寸要跟着新分辨率走）
+    applyFullScreenGeometry()
+  } catch (err) {
+    console.warn('[win] 显示器变化后重算几何失败:', err)
+  }
+}
+
+/**
+ * 监听显示器变化
+ *
+ * 必须等 `app.ready` 之后再注册：`screen` 模块在 ready 之前取用会直接抛
+ * 「The 'screen' module can't be used before the app 'ready' event」——
+ * 放在模块顶层会让整个主进程起不来。
+ */
+const watchDisplayChanges = (): void => {
+  screen.on('display-metrics-changed', handleDisplayChange)
+  screen.on('display-removed', handleDisplayChange)
+  screen.on('display-added', handleDisplayChange)
+}
 
 // 退出前把防抖里待写入的配置/歌单刷到磁盘，避免最后几秒的修改丢失
 app.on('before-quit', () => {

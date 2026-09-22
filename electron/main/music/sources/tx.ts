@@ -197,7 +197,7 @@ const getListDetailOld = async (id: string): Promise<PlaylistDetail> => {
 }
 
 /** 歌单链接 / ID -> 纯数字歌单 id */
-export const getListId = async (rawInput: string): Promise<string> => {
+const getListId = async (rawInput: string): Promise<string> => {
   let id = rawInput.trim()
 
   if (/[?&:/]/.test(id)) {

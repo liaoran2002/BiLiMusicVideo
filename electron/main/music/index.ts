@@ -26,10 +26,10 @@ const SOURCES = {
   kw,
 } as const
 
-export type SupportedSource = keyof typeof SOURCES
+type SupportedSource = keyof typeof SOURCES
 
 /** 当前支持自动/手动解析的音源列表 */
-export const SUPPORTED_SOURCES = Object.keys(SOURCES) as SupportedSource[]
+const SUPPORTED_SOURCES = Object.keys(SOURCES) as SupportedSource[]
 
 export { detectSource }
 

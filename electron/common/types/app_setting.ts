@@ -8,14 +8,6 @@
  * 该文件是纯类型声明，主进程与渲染进程都会引用，保证两边共用同一套类型。
  */
 
-/** 点号扁平键名：'player.volume' -> { player: { volume: number } } */
-export type FlatKeyToNested<T> = {
-  [K in keyof T & string as K extends `${infer H}.${string}` ? H : never]: T[K]
-}
-
-/** 同步时重复歌曲的处理方式 */
-export type DuplicatePolicy = 'keep' | 'dedupe'
-
 export interface AppSetting {
   /** 配置结构版本号，用于迁移判定 */
   version: string
@@ -23,10 +15,35 @@ export interface AppSetting {
   // #region common
   /** 是否以桌面壁纸模式启动（等价于命令行 --wallpaper-mode） */
   'common.wallpaperMode': boolean
-  /** 启动时是否自动播放 */
-  'common.startupAutoPlay': boolean
-  /** 窗口记忆的尺寸 id（后续可扩展多档窗口尺寸） */
-  'common.windowSizeId': number
+  /** 玻璃底色（hex）：控制栏、弹窗、歌单下拉的那层底 */
+  'common.themeColor': string
+  /** 浮层上的文字颜色（hex） */
+  'common.fontColor': string
+  /**
+   * 透明度（0-100）
+   *
+   * 就是玻璃底色 `rgba(255, 255, 255, x)` 里的 x（百分比）：
+   * 30 -> `rgba(255,255,255,0.3)`。
+   * 控制栏、歌单按钮、设置 / 歌单管理弹窗、歌单下拉全用这一份。
+   *
+   * 别和浮层的淡出行为搞混：那是固定的「未悬停 0.1 / 悬停 1」，
+   * 由 CSS 变量 `--ui-idle-opacity` 控制，跟这个设置无关。
+   */
+  'common.glassTransparency': number
+  /**
+   * 模糊强度：`backdrop-filter: blur(Npx)` 的 N（0-20）
+   *
+   * 注意**存的是 px，界面上显示的是百分比**（5% 一档，100% = 20px）：
+   * 50% -> 10px。0 = 不模糊（透出原始画面）。
+   */
+  'common.glassBlur': number
+  /**
+   * 阴影强度：文字阴影的模糊半径（0-20）
+   *
+   * 也是**存 px、界面显示百分比**（5% 一档，100% = 20px）：8px -> 40%。
+   * 只管文字阴影（压在视频上的白字/黑字靠它看清），不是弹窗的投影。
+   */
+  'common.glassShadow': number
   // #endregion
 
   // #region player
@@ -36,8 +53,6 @@ export interface AppSetting {
   'player.isMute': boolean
   /** 切歌模式 */
   'player.loopMode': (typeof import('../constants').PLAY_LOOP_MODES)[number]
-  /** 启动软件时是否恢复上次播放的歌曲下标 */
-  'player.isSavePlayIndex': boolean
   /** 上次播放到第几首 */
   'player.playIndex': number
   /** 启动时自动续播上次的歌单 / 歌曲 / 进度 */

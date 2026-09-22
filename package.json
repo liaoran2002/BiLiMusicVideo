@@ -2,7 +2,7 @@
   "name": "BiLiMusicVideo-desktop",
   "version": "1.5.0",
   "author": "liaoran2002",
-  "description": "基于 Electron + Vue 3 构建的 B站音乐视频播放器,支持歌单自动播放和桌面壁纸模式。",
+  "description": "BLMV：把音乐歌单变成 B 站视频播放列表的桌面播放器。支持网易云 / QQ音乐 / 酷我歌单导入、1080P60 与 Hi-Res 播放、自动续播、桌面壁纸模式。",
   "main": "./out/main/index.js",
   "private": true,
   "scripts": {
@@ -15,15 +15,10 @@
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "pack": "npm run build:only && electron-builder --dir",
-    "dist": "npm run build:only && electron-builder",
-    "test:setting": "node .tmp-test/build-test.mjs && electron .tmp-test/setting-test.cjs"
+    "dist": "npm run build:only && electron-builder"
   },
   "dependencies": {
-    "electron-as-wallpaper": "^2.0.3",
-    "element-plus": "^2.14.2",
-    "koffi": "^2.9.0",
-    "pinia": "^3.0.4",
-    "vue": "^3.5.38"
+    "electron-as-wallpaper": "^2.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
@@ -31,8 +26,11 @@
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^6.0.0-beta.1",
+    "element-plus": "^2.14.2",
+    "pinia": "^3.0.4",
     "typescript": "^5.9.3",
     "vite": "^8.0.16",
+    "vue": "^3.5.38",
     "vue-tsc": "^3.3.11"
   },
   "build": {
@@ -45,9 +43,17 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "public",
+        "to": "icons",
+        "filter": [
+          "bili.ico"
+        ]
+      }
+    ],
     "asarUnpack": [
-      "**/node_modules/electron-as-wallpaper/**",
-      "**/node_modules/koffi/**"
+      "**/node_modules/electron-as-wallpaper/**"
     ],
     "win": {
       "target": [

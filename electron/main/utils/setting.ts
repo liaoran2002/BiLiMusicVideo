@@ -49,9 +49,6 @@ export const onSettingChange = (listener: ChangeListener): (() => void) => {
   }
 }
 
-/** 暴露给主进程内部只读使用（请不要直接改它，改不到磁盘） */
-export const getSettingSnapshot = (): Readonly<AppSetting> => appSetting
-
 const getSettingPath = (): string => path.join(app.getPath('userData'), `${STORE_NAMES.APP_SETTINGS}.json`)
 
 /** 真正落盘 */
@@ -84,8 +81,17 @@ const readFromDisk = (): { setting: AppSetting; needSave: boolean } => {
 
   // 2) 与默认配置合并：以 defaultSetting 的 key 全集为准，
   //    这样新增配置项会自动获得默认值，废弃的 key 会被丢弃
-  const { setting, updatedSettingKeys } = mergeSetting(defaultSetting, migrated)
+  const { setting: merged, updatedSettingKeys } = mergeSetting(defaultSetting, migrated)
   if (updatedSettingKeys.length > 0) needSave = true
+
+  /**
+   * 深拷一份再用。
+   *
+   * mergeSetting 只做一层浅合并：如果用户配置里还没有 `player.tagBonus`
+   * （老用户首次升级就是这样），合并结果里那个对象**和模块级 defaultSetting 是同一引用**。
+   * 以后任何原地修改都会污染默认值，连「恢复默认设置」都会跟着变脏，这里隔断掉。
+   */
+  const setting = structuredClone(merged)
 
   // 3) 版本号始终对齐当前代码里的版本
   if (compareVer(setting.version, SETTING_VERSION) !== 0) {

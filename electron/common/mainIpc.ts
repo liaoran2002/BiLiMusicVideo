@@ -22,21 +22,6 @@ export function mainHandle<C extends IpcChannel>(
   ipcMain.handle(channel, (_event, params) => listener(params as IpcParams<C>))
 }
 
-/** 移除 handler */
-export const mainHandleRemove = (channel: IpcChannel): void => {
-  ipcMain.removeHandler(channel)
-}
-
-/** 向指定 webContents 发送广播 */
-export function mainSend<E extends IpcEvent>(
-  webContents: Electron.WebContents,
-  event: E,
-  payload: IpcEventPayload<E>,
-): void {
-  if (webContents.isDestroyed()) return
-  webContents.send(event, payload)
-}
-
 /**
  * 向所有窗口广播
  *

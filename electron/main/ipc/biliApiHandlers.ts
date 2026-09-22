@@ -261,12 +261,44 @@ export const registerApiHandlers = (context: ApiContext): void => {
 
       // 有 keyword 时统一更新缓存（selectedBvid + 数据）
       if (keyword && cached) {
-        const payload = cached.data as unknown as SearchPayload
-        if (payload?.data) {
-          payload.data.selectedBvid = bvid
-          payload.data.result = results
+        /**
+         * 这里存的必须是**整包返回体**（`{ code, data: { result, selectedBvid } }`），
+         * 不是里面的 `data` —— `api:searchSong` 与渲染层都按外层结构读。
+         */
+        const cachedPayload = cached.data as unknown as SearchPayload | undefined
+        if (cachedPayload?.data) {
+          /**
+           * 写回前**重新读一次**缓存再合并。
+           *
+           * 上面这段解析要跑 view + playurl 两次网络往返（秒级），期间
+           * `api:searchSong`（同一 keyword）或者用户快速切歌可能已经写了新结果；
+           * 直接把手里这份老快照整体 save 回去会把新结果覆盖掉（反向顺序则丢掉刚解析出的地址）。
+           * 两个 handler 都是 async，await 处一定会交错，所以必须合并而不是覆盖。
+           */
+          const fresh = cacheEnabled() ? await cacheManager.get<SearchPayload>(keyword) : null
+          const freshPayload = fresh?.data as unknown as SearchPayload | undefined
+          const freshResults = Array.isArray(freshPayload?.data?.result)
+            ? [...(freshPayload.data.result as CachedSearchItem[])]
+            : [...results]
+          // 以刚读到的为准，把本次解析出来的条目按 bvid 覆盖进去
+          for (const item of results) {
+            if (!item?.bvid) continue
+            const at = freshResults.findIndex((x) => x?.bvid === item.bvid)
+            if (at >= 0) freshResults[at] = { ...freshResults[at], ...item }
+            else freshResults.push(item)
+          }
+          cachedPayload.data.result = freshResults
+          cachedPayload.data.selectedBvid = bvid
+          // 其它字段（分页 / 总数之类）如果新快照有，就一起带上
+          if (freshPayload?.data && freshPayload.data !== cachedPayload.data) {
+            Object.assign(cachedPayload.data, {
+              ...freshPayload.data,
+              result: freshResults,
+              selectedBvid: bvid,
+            })
+          }
+          if (cacheEnabled()) await cacheManager.save(keyword, cachedPayload)
         }
-        if (cacheEnabled()) await cacheManager.save(keyword, cached.data)
       }
 
       /**
@@ -321,6 +353,14 @@ export const registerApiHandlers = (context: ApiContext): void => {
       }
     } catch (err) {
       console.error('解析视频地址异常：', err)
+      /**
+       * `AUTH_FAILED` 是 `requestPlayUrl` 特意抛出来的（cookie 过期 / 没权限），
+       * 原来和其它异常一样被拍成「视频地址解析失败」，渲染层永远不知道该重新登录。
+       * 这里保留错误码，让界面能提示「登录已失效」。
+       */
+      if (err instanceof Error && err.message === 'AUTH_FAILED') {
+        return { videoUrl: null, error: 'AUTH_FAILED' }
+      }
       return { videoUrl: null, error: '视频地址解析失败' }
     }
   })

@@ -143,8 +143,6 @@ export const clearNavData = (): void => {
   navFetchedAt = 0
 }
 
-export const isLoggedIn = (): boolean => loginState === true
-
 /**
  * 确认当前登录态（必要时重新拉 nav）
  *
@@ -160,7 +158,7 @@ export const ensureLoginState = async (): Promise<boolean> => {
   return loginState === true
 }
 
-export const clearMixinKey = (): void => {
+const clearMixinKey = (): void => {
   cachedMixinKey = null
   mixinKeyExpireAt = 0
 }
@@ -265,7 +263,7 @@ const URL_EXPIRE_MARGIN_MS = 5 * 60 * 1000
  *   ...?e=ig8eux...&deadline=...      （部分 CDN 把参数塞进 e= 里）
  * 取不到时返回 null，表示无法判断（按「未知」处理，不当作过期）。
  */
-export const getUrlDeadline = (url: string | null | undefined): number | null => {
+const getUrlDeadline = (url: string | null | undefined): number | null => {
   if (!url || typeof url !== 'string') return null
 
   const readFrom = (search: string): number | null => {
@@ -330,9 +328,15 @@ export async function searchSong(keyword: string, retryCount = 0): Promise<BiliR
   }
 
   const params = buildSearchParams(keyword)
-  const w_rid = oldGetW_rid(params)
+  /**
+   * `tids` 必须**先**设好再算签名。
+   *
+   * 上面走 WBI 的分支就是先 `params.tids = '3'` 再 `encWbi(params, ...)`；
+   * 这里原来顺序反了（先签名后加 tids），请求串里带了 tids 但 w_rid 没覆盖它，
+   * 服务端按收到的参数重算就会对不上 —— 也就是「拿不到 mixin key 时搜索全挂」。
+   */
   params.tids = '3'
-  params.w_rid = w_rid
+  params.w_rid = oldGetW_rid(params)
   const queryString = Object.entries(params)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&')

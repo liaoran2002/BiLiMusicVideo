@@ -85,14 +85,16 @@
       </div>
     </div>
     <div id="controls">
+      <!-- 歌曲列表（播放队列）；打开时变成叉号 -->
       <i
         :class="[
           'iconfont',
-          listType == 'list' ? 'icon-cuowu' : 'icon-yinleliebiao',
+          listType == 'list' ? 'icon-cuowu' : 'icon-bofangduilie',
         ]"
         @click="$emit('videoControl', 'list')"
         id="list"
       ></i>
+      <!-- 视频列表（播放列表） -->
       <i
         :class="[
           'iconfont',
@@ -102,7 +104,7 @@
         id="vList"
       ></i>
       <i
-        class="iconfont icon-play-previous"
+        class="iconfont icon-1_music83"
         @click="$emit('videoControl', 'before')"
         id="before"
       ></i>
@@ -112,7 +114,7 @@
         id="playControls"
       ></i>
       <i
-        class="iconfont icon-play-next"
+        class="iconfont icon-1_music82"
         @click="$emit('videoControl', 'next')"
         id="next"
       ></i>
@@ -155,14 +157,18 @@
           </div>
         </div>
       </div>
+      <!--
+        循环模式：0 列表循环 / 1 单曲循环 / 2 随机播放
+        （原来的 icon-ziyuanldpi 已经从字体里删掉了，换成 icon-suijibofang）
+      -->
       <i
         :class="[
           'iconfont',
           currentMode
             ? currentMode == 1
               ? 'icon-danquxunhuan'
-              : 'icon-ziyuanldpi'
-            : 'icon-shunxubofang',
+              : 'icon-suijibofang'
+            : 'icon-liebiaoxunhuan',
         ]"
         @click="$emit('videoControl', 'playMode')"
         id="playMode"
@@ -196,16 +202,6 @@
 import { defineComponent } from 'vue';
 import type { QualityOptionPayload, QualityOptionsPayload } from '@common/types/ipc';
 import { normalizeImageUrl } from '../utils/image';
-
-/** 组件对外派发的事件（与模板里的 $emit 一一对应） */
-export interface VideoControlEmits {
-  (e: 'changeVolume', volume: number): void;
-  (e: 'changeTime', time: number): void;
-  (e: 'videoControl', action: string): void;
-  (e: 'showList', listType: string): void;
-  /** 用户点击了静音按钮（只上报动作，不决定音量） */
-  (e: 'toggleMute'): void;
-}
 
 export default defineComponent({
   name: 'biliVideoControls',
@@ -396,32 +392,31 @@ export default defineComponent({
 
 <style>
 #biliVideoControls {
-  color: white;
+  /* 配色/圆角/模糊全部走主题令牌，和歌单面板、弹窗保持同一套风格 */
+  color: var(--glass-text);
   position: fixed;
   bottom: 5%;
   left: 50%;
   user-select: none;
-  background: rgba(255, 255, 255, 0.3);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  border-radius: 12px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--glass-radius);
   padding: 20px;
   min-width: 10vw;
   max-width: 50vw;
   transform: translate(-50%, 0%);
-  opacity: 0.1;
+  /* 未悬停时的不透明度由固定的 --ui-idle-opacity 决定（鼠标移上去变 1） */
+  opacity: var(--ui-idle-opacity);
   transition: all 0.5s ease-in-out;
   font-size: 5vh;
+  /* 白字 + 黑阴影（深色主题换成白阴影），压在亮/暗视频上都看得清 */
+  text-shadow: var(--glass-shadow);
 }
 #biliVideoControls:hover {
   opacity: 1;
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 10px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-shadow);
 }
 .videoName-container {
   overflow: hidden;
@@ -432,9 +427,7 @@ export default defineComponent({
 .videoName-scroll {
   display: inline-flex;
   gap: 5em;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
   animation: scroll-left 10s linear infinite;
 }
 .videoName-scroll.paused {
@@ -460,9 +453,19 @@ export default defineComponent({
   justify-content: space-evenly;
 }
 #controls i {
-  font-size: 10vh;
+  /*
+   * 只缩字形，不动按钮高度。
+   *
+   * 这里必须显式 `height` + `inline-flex`：`sound` 那个图标在 `.audio-control`
+   * （inline-block）里面，行内元素的 `height` 不生效、盒子高度会跟着字号一起缩，
+   * 于是它的点击区域会比别的按钮小一圈。统一成 10vh 的 inline-flex 就不会了。
+   */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 7vh;
   height: 10vh;
-  line-height: 10vh;
+  line-height: 1;
 }
 .audio-control {
   position: relative;
@@ -476,7 +479,7 @@ export default defineComponent({
   transform: translateX(-50%);
   width: 30px;
   height: 120px;
-  background: rgba(255, 255, 255, 0.8);
+  background: rgba(var(--text-rgb), 0.8);
   border-radius: 4px;
   padding: 8px 5px;
   opacity: 0;
@@ -500,10 +503,8 @@ export default defineComponent({
 .volume-track {
   width: 4px;
   height: 100%;
-  background: rgba(255, 255, 255, 0.3);
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  background: rgba(var(--text-rgb), 0.3);
+  box-shadow: var(--glass-shadow);
   border-radius: 2px;
   position: relative;
   touch-action: none;
@@ -514,7 +515,7 @@ export default defineComponent({
   left: 0;
   width: 100%;
   height: 70%;
-  background: white;
+  background: rgb(var(--text-rgb));
   border-radius: 2px;
   transition: height 0.1s ease;
 }
@@ -525,12 +526,10 @@ export default defineComponent({
   transform: translate(-50%, 50%);
   width: 12px;
   height: 12px;
-  background: white;
+  background: rgb(var(--text-rgb));
   border-radius: 50%;
   cursor: pointer;
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-shadow);
   transition: bottom 0.1s ease;
 }
 .volume-number {
@@ -540,9 +539,7 @@ export default defineComponent({
   font-size: 14px;
   min-width: 60px;
   text-align: center;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
 }
 .progressContainer {
   display: flex;
@@ -555,17 +552,15 @@ export default defineComponent({
 .progressWrapper {
   flex: 1;
   height: 5px;
-  background-color: rgba(255, 255, 255, 0.3);
+  background-color: rgba(var(--text-rgb), 0.3);
   position: relative;
   touch-action: none;
   cursor: pointer;
 }
 .progressBar {
   height: 100%;
-  background-color: rgba(255, 255, 255, 0.8);
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  background-color: rgba(var(--text-rgb), 0.8);
+  box-shadow: var(--glass-shadow);
   position: relative;
 }
 .progressHandle {
@@ -575,11 +570,9 @@ export default defineComponent({
   transform: translateY(-50%);
   width: 15px;
   height: 15px;
-  background-color: #fff;
+  background-color: rgb(var(--text-rgb));
   border-radius: 50%;
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glass-shadow);
   display: none;
 }
 #biliVideoControls:hover .progressHandle {
@@ -607,7 +600,7 @@ export default defineComponent({
   border-radius: 0.16em;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -620,7 +613,7 @@ export default defineComponent({
   display: block;
 }
 .np-cover-fallback {
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--glass-text-dim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -646,13 +639,12 @@ export default defineComponent({
 .np-subtitle {
   flex: 1 1 auto;
   min-width: 0;
-  color: rgba(255, 255, 255, 0.75);
+  /* 副标题（歌曲名 - 歌手 · 专辑）也要跟「字体颜色」设置走 */
+  color: var(--glass-text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
 }
 /* 清晰度 / 音质小标签：不参与收缩，永远贴在最右边；点开是切换菜单 */
 .np-quality {
@@ -664,18 +656,16 @@ export default defineComponent({
   line-height: 1;
   padding: 0.24em 0.5em;
   border-radius: 0.35em;
-  color: #fff;
+  color: var(--glass-text);
   letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.22);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  background: rgba(var(--text-rgb), 0.22);
+  border: 1px solid rgba(var(--text-rgb), 0.4);
+  text-shadow: var(--glass-shadow);
 }
 .np-quality:hover {
-  background: rgba(255, 255, 255, 0.34);
+  background: rgba(var(--text-rgb), 0.34);
 }
 .np-caret {
   font-size: 0.8em;

@@ -9,7 +9,7 @@
  * rename 在同一分区上是原子的，能保证要么是旧内容要么是新内容。
  */
 import fs from 'node:fs'
-import path from 'node:path'
+import { writeJsonAtomic } from './atomicJson'
 
 interface StoreOptions {
   /** 读取到非法 JSON 时是否清空重建（false 则抛错） */
@@ -18,13 +18,11 @@ interface StoreOptions {
 
 export default class Store<T extends Record<string, unknown>> {
   private readonly filePath: string
-  private readonly dirPath: string
   private data: Partial<T>
 
   constructor(filePath: string, options: StoreOptions = {}) {
     const { clearInvalidConfig = true } = options
     this.filePath = filePath
-    this.dirPath = path.dirname(filePath)
     this.data = this.read(clearInvalidConfig)
   }
 
@@ -57,22 +55,9 @@ export default class Store<T extends Record<string, unknown>> {
     }
   }
 
-  /** 原子写入 */
+  /** 原子写入（temp + rename，实现见 utils/atomicJson.ts） */
   private writeFile(): void {
-    const tempPath = `${this.filePath}.${Math.random().toString(36).slice(2, 10)}.temp`
-    const json = JSON.stringify(this.data, null, '\t')
-    try {
-      fs.writeFileSync(tempPath, json, 'utf8')
-    } catch (err) {
-      // 目录不存在（首次写入）时补建后重试一次
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        fs.mkdirSync(this.dirPath, { recursive: true })
-        fs.writeFileSync(tempPath, json, 'utf8')
-      } else {
-        throw err
-      }
-    }
-    fs.renameSync(tempPath, this.filePath)
+    writeJsonAtomic(this.filePath, this.data, '\t')
   }
 
   /** 读取值 */
@@ -80,26 +65,10 @@ export default class Store<T extends Record<string, unknown>> {
     return this.data[key]
   }
 
-  /** 是否存在该 key */
-  has<K extends keyof T>(key: K): boolean {
-    return key in this.data
-  }
-
-  /** 设置单个值并落盘 */
-  set<K extends keyof T>(key: K, value: T[K]): void {
-    this.data[key] = value
-    this.writeFile()
-  }
-
   /** 整体覆盖并落盘 */
   override(value: Partial<T>): void {
     this.data = value
     this.writeFile()
-  }
-
-  /** 当前内存快照 */
-  get all(): Partial<T> {
-    return this.data
   }
 }
 

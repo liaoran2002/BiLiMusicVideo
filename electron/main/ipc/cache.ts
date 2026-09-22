@@ -10,7 +10,6 @@ interface CacheContext {
 
 export const registerCacheHandlers = (context: CacheContext): void => {
   mainHandle('cache:clearAll', () => context.cacheManager.clearAll())
-  mainHandle('cache:clearSingle', ({ keyword }) => context.cacheManager.clearSingle(keyword))
   mainHandle('cache:getStats', () => context.cacheManager.getStats())
   mainHandle('cache:prune', () => context.cacheManager.prune())
 }

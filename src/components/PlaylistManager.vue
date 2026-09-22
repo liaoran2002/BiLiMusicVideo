@@ -2,9 +2,8 @@
   <el-dialog
     v-model="visible"
     width="960px"
-    top="5vh"
-    :close-on-click-modal="false"
-    class="plm-dialog"
+    :show-close="false"
+    align-center
     @update:model-value="onVisibleChange"
   >
     <template #header>
@@ -200,8 +199,8 @@
               <div class="plm-idx">{{ row.index + 1 }}</div>
               <div class="plm-thumb">
                 <img
-                  v-if="normalizeImageUrl(row.song.cover)"
-                  :src="normalizeImageUrl(row.song.cover) as string"
+                  v-if="coverOf(row.song) && !failedCovers[coverOf(row.song) as string]"
+                  :src="coverOf(row.song) as string"
                   alt=""
                   referrerpolicy="no-referrer"
                   loading="lazy"
@@ -265,7 +264,7 @@ export default defineComponent({
     /** 当前播放到第几首（仅当展示的是当前歌单时有意义） */
     currentIndex: { type: Number, default: -1 },
   },
-  emits: ['update:modelValue', 'switch', 'play'],
+  emits: ['update:modelValue', 'switch', 'play', 'reload'],
   data() {
     return {
       SYNC_INTERVAL_OPTIONS,
@@ -275,6 +274,8 @@ export default defineComponent({
       editingId: '',
       saving: false,
       originalSongs: [] as PlaylistSong[],
+      /** 加载失败的封面地址（按地址记，换一个地址就有一次新机会） */
+      failedCovers: {} as Record<string, boolean>,
       form: {
         name: '',
         sourceUrl: '',
@@ -336,7 +337,22 @@ export default defineComponent({
       this.$emit('update:modelValue', v);
     },
     onImgError(e: Event) {
-      (e.target as HTMLImageElement).style.display = 'none';
+      /**
+       * 记下坏掉的封面地址，而不是给 <img> 写内联 `display: none`。
+       *
+       * 曲目行是 `:key="row.index"`，切歌单时同一位置的 DOM 会被复用，
+       * Vue 只 patch `src`，那个内联样式不会被清掉 ——
+       * 结果一个歌单里坏了一张封面，别的歌单同一行的封面就永远是空的。
+       */
+      const img = e.target as HTMLImageElement;
+      const src = img.getAttribute('src');
+      if (!src) return;
+      if (Object.keys(this.failedCovers).length > 2000) this.failedCovers = {};
+      this.failedCovers[src] = true;
+    },
+    /** 封面地址（规整成 https）；空值交给模板判空 */
+    coverOf(song: PlaylistSong): string | null {
+      return normalizeImageUrl(song.cover);
     },
     isPlayingRow(row: Row): boolean {
       // 只有展示的是「当前播放歌单」时才高亮当前曲
@@ -351,9 +367,15 @@ export default defineComponent({
         case 'startup':
           return '启动同步';
         case 'interval':
-          return item.sync.intervalMs > 0
+          /**
+           * 间隔可能小于 1 小时（常量表里最小是「每 30 分钟」），
+           * 直接 `Math.round(ms / 3600000)` 会把 30 分钟显示成「每 1 小时」。
+           */
+          return item.sync.intervalMs >= 3600000
             ? `每 ${Math.round(item.sync.intervalMs / 3600000)} 小时`
-            : '定时同步';
+            : item.sync.intervalMs >= 60000
+              ? `每 ${Math.round(item.sync.intervalMs / 60000)} 分钟`
+              : '定时同步';
         default:
           return '手动同步';
       }
@@ -445,7 +467,8 @@ export default defineComponent({
         };
 
         if (this.editingId) {
-          await this.store.updatePlaylist(this.editingId, {
+          const editedId = this.editingId;
+          await this.store.updatePlaylist(editedId, {
             name: finalName,
             songs,
             source,
@@ -454,8 +477,14 @@ export default defineComponent({
             sync,
           });
           ElMessage.success(`歌单《${finalName}》已更新`);
-          this.selectedId = this.editingId;
-          this.$emit('switch', this.editingId);
+          this.selectedId = editedId;
+          /**
+           * 只有「编辑的正好是当前播放的歌单」时才需要通知外面重载曲目；
+           * 而且这时**不能**当成「切换歌单」—— App 的 onPlaylistSwitch 会把播放进度清零
+           * 并从头重播，用户只是改个名字/同步一下，正在听的歌不该被打回 0 秒。
+           * 所以这里改成发一个只刷新的事实：调用方按 currentId 判断。
+           */
+          if (editedId === this.store.currentId) this.$emit('reload');
         } else {
           const created = await this.store.addPlaylist({
             name: finalName,
@@ -512,12 +541,15 @@ export default defineComponent({
       this.$emit('switch', item.id);
     },
     async remove(item: PlaylistRecord) {
+      const wasCurrent = item.id === this.store.currentId;
       await this.store.removePlaylist(item.id);
       ElMessage.success(`已删除《${item.name}》`);
       if (this.selectedId === item.id) {
         this.selectedId = this.store.currentId || this.store.playlists[0]?.id || '';
       }
-      this.$emit('switch', this.store.currentId);
+      // 删掉的正好是当前歌单 -> 外面得换歌继续放；删的是别的歌单则只刷新，别打断正在听的
+      if (wasCurrent) this.$emit('switch', this.store.currentId);
+      else this.$emit('reload');
     },
     /** 点歌单里的某首歌：切到该歌单并播放 */
     async play(index: number) {
@@ -559,7 +591,7 @@ export default defineComponent({
   flex: none;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid rgba(128, 128, 128, 0.16);
+  border-right: 1px solid var(--panel-divider);
   padding-right: 12px;
 }
 .plm-side-list {
@@ -576,10 +608,10 @@ export default defineComponent({
   margin-bottom: 2px;
 }
 .plm-pl:hover {
-  background: rgba(128, 128, 128, 0.1);
+  background: var(--panel-hover);
 }
 .plm-pl.sel {
-  background: rgba(102, 120, 232, 0.16);
+  background: var(--panel-active);
 }
 .plm-pl.cur .plm-pl-name {
   font-weight: 600;
@@ -601,7 +633,7 @@ export default defineComponent({
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #6f8cff;
+  background: var(--accent);
   flex: none;
 }
 .plm-pl-meta {
@@ -614,11 +646,11 @@ export default defineComponent({
 .plm-tag {
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(128, 128, 128, 0.2);
+  background: var(--panel-hover);
 }
 .plm-spin {
   flex: none;
-  color: #6f8cff;
+  color: var(--accent);
 }
 .plm-spin.on svg {
   animation: plm-rotate 0.9s linear infinite;
@@ -632,7 +664,7 @@ export default defineComponent({
   display: flex;
   gap: 6px;
   padding-top: 10px;
-  border-top: 1px solid rgba(128, 128, 128, 0.16);
+  border-top: 1px solid var(--panel-divider);
 }
 .plm-side-actions :deep(.el-button) {
   flex: 1;
@@ -695,7 +727,7 @@ export default defineComponent({
 .plm-songs {
   flex: 1;
   overflow-y: auto;
-  border: 1px solid rgba(128, 128, 128, 0.16);
+  border: 1px solid var(--panel-divider);
   border-radius: 8px;
 }
 .plm-song {
@@ -704,19 +736,19 @@ export default defineComponent({
   gap: 9px;
   padding: 6px 9px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+  border-bottom: 1px solid var(--panel-hover);
 }
 .plm-song:last-child {
   border-bottom: none;
 }
 .plm-song:hover {
-  background: rgba(128, 128, 128, 0.1);
+  background: var(--panel-hover);
 }
 .plm-song.playing {
-  background: rgba(102, 120, 232, 0.18);
+  background: var(--panel-active);
 }
 .plm-song.playing .plm-song-name {
-  color: #5b6fe0;
+  color: var(--accent-strong);
   font-weight: 600;
 }
 .plm-idx {
@@ -812,7 +844,7 @@ export default defineComponent({
   justify-content: flex-end;
   gap: 6px;
   padding-top: 10px;
-  border-top: 1px solid rgba(128, 128, 128, 0.16);
+  border-top: 1px solid var(--panel-divider);
 }
 .plm-empty {
   padding: 24px 8px;

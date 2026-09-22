@@ -1,9 +1,9 @@
 <template>
   <div id="app">
     <div class="titlebar">
-      <!-- 左侧：歌单入口（原「设置歌单」按钮已并入这里） -->
+      <!-- 左侧：歌单入口（点一下直接打开歌单管理弹窗，没有二级菜单） -->
       <div class="titlebar-left">
-        <PlaylistPanel @switch="onPlaylistSwitch" @manage="playlistManagerVisible = true" />
+        <PlaylistPanel @manage="playlistManagerVisible = true" />
       </div>
       <!-- 中间：拖拽区 -->
       <div class="titlebar-drag"
@@ -25,19 +25,10 @@
           <span class="user-name">{{ userName || '未登录' }}</span>
         </div>
         <div class="win-btn" @click="settingsVisible = true" title="设置">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-            <path
-              d="M13 8c0-.3 0-.6-.1-.9l1.3-1-1.3-2.2-1.5.6a4.9 4.9 0 0 0-1.5-.9L9.7 2H7.1l-.2 1.6c-.6.2-1.1.5-1.6.9l-1.5-.6L2.5 6.1l1.3 1a5.4 5.4 0 0 0 0 1.8l-1.3 1 1.3 2.2 1.5-.6c.4.4 1 .7 1.6.9l.2 1.6h2.6l.2-1.6c.6-.2 1.1-.5 1.5-.9l1.5.6 1.3-2.2-1.3-1c.1-.3.1-.6.1-.9Z"
-              stroke="currentColor"
-              stroke-width="1.1"
-              stroke-linejoin="round"
-            />
-          </svg>
+          <i class="iconfont icon-shezhi"></i>
+        </div>
+        <div class="win-btn" @click="aboutVisible = true" title="关于">
+          <i class="iconfont icon-guanyu"></i>
         </div>
         <div
           class="win-btn"
@@ -45,9 +36,7 @@
           title="最小化"
           v-if="!wallpaperEnabled"
         >
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <rect y="5" width="12" height="1" fill="currentColor" />
-          </svg>
+          <i class="iconfont icon-zuixiaohua"></i>
         </div>
         <div
           class="win-btn"
@@ -55,50 +44,13 @@
           :title="isMaximized || isFullscreen ? '向下还原' : '最大化'"
           v-if="!wallpaperEnabled"
         >
-          <svg
-            v-if="!(isMaximized || isFullscreen)"
-            width="12"
-            height="12"
-            viewBox="0 0 12 12"
-          >
-            <rect
-              x="1"
-              y="1"
-              width="10"
-              height="10"
-              rx="1"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1"
-            />
-          </svg>
-          <svg v-else width="12" height="12" viewBox="0 0 12 12">
-            <rect
-              x="2.5"
-              y="3.5"
-              width="7"
-              height="7"
-              rx="0.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1"
-            />
-            <path
-              d="M4 3.5V2a1 1 0 011-1h5a1 1 0 011 1v5a1 1 0 01-1 1H8"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1"
-            />
-          </svg>
+          <i
+            class="iconfont"
+            :class="isMaximized || isFullscreen ? 'icon-xiangxiahuanyuan' : 'icon-chuangti-zuidahua'"
+          ></i>
         </div>
         <div class="win-btn win-close" @click="winClose" title="关闭">
-          <svg width="12" height="12" viewBox="0 0 12 12">
-            <path
-              d="M1 1L11 11M1 11L11 1"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-          </svg>
+          <i class="iconfont icon-guanbi"></i>
         </div>
       </div>
     </div>
@@ -108,14 +60,44 @@
     <video
       id="biliVideo"
       ref="video"
-      @canplay="videoCanPlay"
       @loadeddata="onVideoLoaded"
       @timeupdate="videoUpDate"
       @ended="videoEnded"
       @error="videoError"
+      @waiting="onVideoBuffering"
+      @stalled="onVideoBuffering"
+      @seeking="onVideoBuffering"
+      @progress="syncBufferState"
+      @playing="onVideoPlaying"
+      @seeked="syncBufferState"
+      @canplaythrough="syncBufferState"
       @play="onVideoPlayStateChange"
       @pause="onVideoPlayStateChange"
     ></video>
+
+    <!--
+      缓冲提示
+      切换清晰度 / 切歌时 MSE 要重新拉流，这段没有任何反馈的话看起来就是「卡死了」。
+      这里像视频平台那样给出百分比，明确是「在缓冲」而不是「出问题了」。
+    -->
+    <div v-if="buffering" class="buffer-overlay">
+      <div class="buffer-ring-wrap">
+        <svg class="buffer-ring" viewBox="0 0 36 36">
+          <circle class="ring-bg" cx="18" cy="18" r="15.5" />
+          <circle
+            class="ring-fg"
+            cx="18"
+            cy="18"
+            r="15.5"
+            :stroke-dasharray="ringLength"
+            :stroke-dashoffset="ringOffset"
+          />
+        </svg>
+        <span class="buffer-percent">{{ bufferPercent }}%</span>
+      </div>
+      <div class="buffer-text">缓冲中…</div>
+      <div class="buffer-sub">{{ bufferSubText }}</div>
+    </div>
     <showList
       :listType="listType"
       :title="listType == 'list' ? listName : songName"
@@ -156,30 +138,10 @@
       v-if="!wallpaperEnabled"
       :title="isFullscreen ? '退出全屏' : '全屏'"
     >
-      <svg
-        v-if="!isFullscreen"
-        width="20"
-        height="20"
-        viewBox="0 0 20 20"
-        fill="none"
-      >
-        <path
-          d="M3 7V3H7M13 3H17V7M17 13V17H13M7 17H3V13"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
-      <svg v-else width="20" height="20" viewBox="0 0 20 20" fill="none">
-        <path
-          d="M7 3V7H3M17 7H13V3M13 17V13H17M3 13H7V17"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
+      <i
+        class="iconfont"
+        :class="isFullscreen ? 'icon-suoxiao' : 'icon-full-screen'"
+      ></i>
     </div>
 
     <!-- 歌单管理：新建 / 编辑 / 同步 / 曲目浏览全部在这一个弹窗里 -->
@@ -189,10 +151,14 @@
       :current-index="currentIndex"
       @switch="onPlaylistSwitch"
       @play="onPlayFromManager"
+      @reload="reloadCurrentPlaylistSongs"
     />
 
     <!-- 设置 -->
     <SettingsDialog v-model="settingsVisible" />
+
+    <!-- 关于 -->
+    <AboutDialog v-model="aboutVisible" />
   </div>
 </template>
 
@@ -206,6 +172,7 @@ import showList from './components/showList.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
 import PlaylistManager from './components/PlaylistManager.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
+import AboutDialog from './components/AboutDialog.vue';
 import electronApi from './api/electron';
 import { useSettingStore } from './stores/setting';
 import { usePlaylistStore } from './stores/playlists';
@@ -215,6 +182,16 @@ import { normalizeImageUrl } from './utils/image';
 import { qualityLabelOf } from './utils/videoQuality';
 import { DashSession } from './utils/dashPlayer';
 import type { DashStreamsPayload, QualityOptionsPayload } from '@common/types/ipc';
+
+/**
+ * 起播需要缓冲到多少秒才算「够」
+ *
+ * 缓冲百分比就是以它为分母算的：起播时数字会从 0 很快涨到 100，
+ * 用户能明确看到「在动」而不是「卡死」。
+ */
+const START_BUFFER_S = 5;
+/** 播放中需要前方至少有多少秒余量才认为不会卡 */
+const LEAD_S = 3;
 import type {
   AppData,
   BiliVideo,
@@ -225,7 +202,7 @@ import type {
 
 export default defineComponent({
   name: 'App',
-  components: { biliVideoControls, showList, PlaylistPanel, PlaylistManager, SettingsDialog },
+  components: { biliVideoControls, showList, PlaylistPanel, PlaylistManager, SettingsDialog, AboutDialog },
   setup() {
     // Pinia 只做渲染进程的响应式副本；真正的持久化在主进程。
     // 注意 setup() 会在 options 的 data/computed/methods 之前执行，
@@ -268,6 +245,27 @@ export default defineComponent({
     audioQualityDetail(): string {
       if (!this.audioQuality) return '';
       return this.audioQualityDesc || this.audioQuality;
+    },
+    /** 缓冲圆环的周长（r = 15.5，SVG viewBox 36x36） */
+    ringLength(): number {
+      return 2 * Math.PI * 15.5;
+    },
+    /** 缓冲圆环的绘制偏移：百分比越大画得越满 */
+    ringOffset(): number {
+      return this.ringLength * (1 - Math.min(100, Math.max(0, this.bufferPercent)) / 100);
+    },
+    /**
+     * 缓冲提示的副标题
+     *
+     * 把三个阶段分开说清楚，否则「0% 不动」和「99% 卡住」都会让人以为出问题了：
+     *  - 还没拿到数据 -> 正在取流
+     *  - 数据够了但解码器还没就绪 -> 即将播放
+     *  - 其余 -> 报已缓冲秒数
+     */
+    bufferSubText(): string {
+      if (this.bufferSeconds <= 0.05) return '正在获取视频流…';
+      if (this.bufferPercent >= 95) return '即将开始播放…';
+      return `已缓冲 ${this.bufferSeconds.toFixed(1)} 秒`;
     },
     /** 当前实际在播的清晰度代码；durl 兜底时没有 dash 信息，返回 null */
     currentVideoQn(): number | null {
@@ -364,6 +362,8 @@ export default defineComponent({
       lastNonZeroVolume: 0,
       /** 设置弹窗 */
       settingsVisible: false,
+      /** 关于弹窗 */
+      aboutVisible: false,
       /** 视频请求竞态令牌（切视频时防乱序覆盖） */
       _videoToken: 0,
       /** 同一个视频的连续失败次数，达到上限就跳过该曲，避免无限重试 */
@@ -376,12 +376,29 @@ export default defineComponent({
       _dashDisabled: false,
       /** 视频加载完成后要跳转到的秒数（续播用） */
       seekAfterLoad: 0,
+      /**
+       * `seekAfterLoad` 是为哪一首歌设的
+       *
+       * 这个字段必须一起带上：`seekAfterLoad` 是跨源共享的，
+       * 若切歌后还拿旧的秒数去 seek，短一点的歌会直接被定位到 duration 之外。
+       */
+      seekAfterLoadFor: '',
+      /** 是否正在缓冲（切换清晰度 / 切歌时 MSE 重新拉流的那段） */
+      buffering: false,
+      /** 缓冲进度百分比（0-100，朝「够播」推进） */
+      bufferPercent: 0,
+      /** 播放位置之后已缓冲的秒数 */
+      bufferSeconds: 0,
+      /** 缓冲百分比的定时刷新句柄（只在缓冲期间跑） */
+      _bufferTimer: null as ReturnType<typeof setInterval> | null,
       /** 上次写入播放进度的时间戳（节流用） */
       _lastPersistAt: 0,
       /** 上次同步 SMTC 进度的时间戳（节流用） */
       _lastMediaPosAt: 0,
       /** 定时自动同步的定时器 */
       _syncTimer: null as ReturnType<typeof setInterval> | null,
+      /** 定时器对应的「策略指纹」，用来避免被无关的配置广播反复重建 */
+      _syncKey: '',
     };
   },
   methods: {
@@ -424,7 +441,8 @@ export default defineComponent({
 
       // 后台做启动同步，不阻塞续播
       void this.runStartupSync();
-      // 按设置启动「定时自动同步」定时器
+      // 按歌单的定时同步策略装心跳（记下指纹，免得后续无关的配置广播重建它）
+      this._syncKey = `${this.playlistsStore.hasIntervalSync}|${this.playlistsStore.minSyncInterval}`;
       this.setupSyncTimer();
 
       // 优先续播；没有可续播内容时退回「当前歌单的第一首」
@@ -521,6 +539,9 @@ export default defineComponent({
       const keepIndex = this.currentIndex;
       this.songs = [...record.songs];
       this.listName = record.name;
+      // 曲目变了，随机播放的下标表必须跟着重建：
+      // 否则同步后曲目变少，随机列表里还留着越界下标，「下一首」会拿到 null 静默不动
+      this.resetRandomList();
       if (this.songs.length === 0) return;
       if (keepIndex >= this.songs.length) {
         this.currentIndex = 0;
@@ -564,56 +585,60 @@ export default defineComponent({
     /**
      * 恢复某首歌对应的视频
      *
-     * 优先用该歌单里记录的「上次选定的视频」（bvId 稳定，能精确回到同一个视频）；
-     * 没有记录时才重新搜索匹配。
+     * 直接走一次正常搜索把候选列表铺满 —— 这首歌上次就是「正在播」的那首，
+     * `api:searchSong` 基本命中主进程的搜索结果缓存（磁盘缓存，秒回），
+     * 所以没必要为了省这一趟请求让 `videoList` 只放一条占位
+     * （那样续播后点开视频列表只有孤零零一行）。
+     *
+     * 播哪个视频仍然以歌单里记住的 bvid 为准，而且直链一律交给
+     * `api:resolveVideo` 现取：搜索结果里带的地址可能早就过了签名时效。
      *
      * @param seekTo 播放起点（秒），0 表示从头
      * @returns 是否成功
      */
     async restoreSongVideo(songName: string, seekTo = 0): Promise<boolean> {
       const cached = this.playlistsStore.getVideoForSong(songName);
-      if (cached) {
-        try {
-          const res = await electronApi.resolveVideoUrl(cached.bvid, songName);
-          if (res.videoUrl || res.dash) {
-            this.dashSource = res.dash ?? null;
-            this.videoUrl = res.videoUrl ?? '';
-            this.applyVideoSource();
-            this.currentBvid = cached.bvid;
-            // 标题/封面优先用主进程回传的：歌单里的记录可能是旧版本写坏的空值
-            this.videoName = res.title || cached.title || '';
-            this.videoPic =
-              normalizeImageUrl(res.pic ?? null) ||
-              normalizeImageUrl(cached.cover ?? null) ||
-              '';
-            this.videoQuality = res.quality ?? '';
-            this.videoQualityDesc = res.qualityDesc ?? '';
-            this.audioQuality = res.audioQuality ?? '';
-            this.audioQualityDesc = res.audioQualityDesc ?? '';
-            this.qualityOptions = res.options ?? null;
-            this.songName = songName;
-            this.videoList = [
-              {
-                bvid: cached.bvid,
-                title: this.videoName,
-                pic: this.videoPic || null,
-              },
-            ];
-            this.videoListKeyword = songName;
-            this.currentVideoIndex = 0;
-            this.seekAfterLoad = seekTo;
-            // 旧版本可能把标题/封面写成空值，顺手修好，免得一直续播成「无标题」
-            if (!cached.title || !cached.cover) {
-              void this.recordCurrentVideo(cached.bvid, songName, this.videoName, this.videoPic);
-            }
-            return true;
-          }
-        } catch (err) {
-          console.warn('[resume] 已记录的视频失效，改为重新匹配', err);
-        }
+      if (!cached) return false;
+
+      // 歌曲信息先切过来：搜索往返期间界面显示的也该是这首歌
+      this.songName = songName;
+
+      try {
+        const res = await electronApi.searchSong(songName);
+        const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
+        this.videoList = this.sortSearchedVideos(videos, songName);
+        this.videoListKeyword = songName;
+      } catch (err) {
+        // 搜索失败不致命：至少还能把歌单里记住的那条播起来
+        console.warn('[resume] 搜索失败，只按歌单里记住的视频续播', err);
+        this.videoList = [];
       }
-      // 回退：重新搜索并匹配
-      return false;
+
+      if (seekTo > 0) {
+        this.seekAfterLoad = seekTo;
+        this.seekAfterLoadFor = songName;
+      }
+
+      // 交给 changeVideo 解析并起播：它顺手回填标题/封面/清晰度，地址过期会自动重取
+      await this.changeVideo(cached.bvid, songName);
+      if (this.currentBvid === cached.bvid && (this.videoUrl || this.dashSource)) {
+        // 记住的视频不在这轮搜索结果里 -> 补成列表第一项，别让「正在播的」在列表里找不到
+        if (this.currentVideoIndex < 0) {
+          this.videoList = [
+            { bvid: cached.bvid, title: this.videoName, pic: this.videoPic || null },
+            ...this.videoList,
+          ];
+          this.currentVideoIndex = 0;
+        }
+        return true;
+      }
+
+      // 记住的视频已经播不了（被删 / 换源）-> 退回搜索结果第一条
+      const first = this.videoList[0];
+      if (!first || first.bvid === cached.bvid) return false;
+      console.warn('[resume] 歌单里记住的视频已失效，改用搜索结果第一条', first.bvid);
+      await this.changeVideo(first.bvid, songName);
+      return Boolean(this.videoUrl || this.dashSource);
     },
     /** 循环模式：字符串枚举 -> 数字下标（供 biliVideoControls 使用） */
     loopModeToIndex(mode: AppSetting['player.loopMode']): number {
@@ -649,7 +674,10 @@ export default defineComponent({
       if (!bvid) return;
       // 重新解析会换 URL，视频会重新加载，先把进度记下来
       const resumeAt = this.currentTime;
-      if (resumeAt > 3) this.seekAfterLoad = resumeAt;
+      if (resumeAt > 3) {
+        this.seekAfterLoad = resumeAt;
+        this.seekAfterLoadFor = this.songName;
+      }
       this.$message.success('登录成功，正在用更高清晰度重新加载当前视频');
       await this.changeVideo(bvid, this.videoListKeyword || this.songName, { skipCache: true });
     },
@@ -720,20 +748,10 @@ export default defineComponent({
       this.listName = record.name;
       this.currentIndex = Math.min(Math.max(0, index), this.songs.length - 1);
       this.seekAfterLoad = 0;
+      this.seekAfterLoadFor = '';
       this.videoList = [];
       this.videoListKeyword = '';
-      this.videoUrl = '';
-      this.dashSource = null;
-      this.currentBvid = '';
-      this.stopDashSession();
-      this.videoName = '';
-      this.videoPic = '';
-      this.videoQuality = '';
-      this.videoQualityDesc = '';
-      this.audioQuality = '';
-      this.audioQualityDesc = '';
-      this.qualityOptions = null;
-      this.videoQualityPixels = '';
+      this.clearNowPlaying();
       this.songName = '';
       void this.playCurrent();
     },
@@ -744,27 +762,22 @@ export default defineComponent({
         this.songs = [];
         this.videoList = [];
         this.videoListKeyword = '';
-        this.videoUrl = '';
-      this.dashSource = null;
-      this.currentBvid = '';
-      this.stopDashSession();
         this.listName = '';
         this.currentIndex = 0;
         this.currentVideoIndex = 0;
-        this.videoName = '';
-        this.videoPic = '';
-        this.videoQuality = '';
-      this.videoQualityDesc = '';
-      this.audioQuality = '';
-      this.audioQualityDesc = '';
-      this.qualityOptions = null;
-      this.videoQualityPixels = '';
         this.songName = '';
+        this.clearNowPlaying();
         this.playlistManagerVisible = true;
         return;
       }
       const record = this.playlistsStore.current;
       if (!record) return;
+      // 防御：弹窗有时只想「刷新」却发成了 switch。currentId 没变就说明不是真的切换，
+      // 只重载曲目、别把正在听的歌从头重播
+      if (id !== this.playlistsStore.currentId) {
+        await this.reloadCurrentPlaylistSongs();
+        return;
+      }
 
       // 换歌单时把进度重置，避免把上一个歌单的秒数带到新歌单
       this.songs = [...record.songs];
@@ -774,21 +787,11 @@ export default defineComponent({
       this.videoList = [];
       this.videoListKeyword = '';
       this.currentVideoIndex = 0;
-      this.videoUrl = '';
-      this.dashSource = null;
-      this.currentBvid = '';
-      this.stopDashSession();
-      this.videoName = '';
-      this.videoPic = '';
-      this.videoQuality = '';
-      this.videoQualityDesc = '';
-      this.audioQuality = '';
-      this.audioQualityDesc = '';
-      this.qualityOptions = null;
-      this.videoQualityPixels = '';
+      this.clearNowPlaying();
       this.songName = '';
       this.currentTime = 0;
       this.seekAfterLoad = 0;
+      this.seekAfterLoadFor = '';
       await this.settingStore.update({
         'player.playIndex': this.currentIndex,
         'player.resumeTime': 0,
@@ -801,10 +804,54 @@ export default defineComponent({
       this.$message.success(`已切换到《${record.name}》（${this.songs.length} 首）`);
       void this.playCurrent();
     },
+    /**
+     * 清掉「正在播放」的视频信息
+     *
+     * 切歌单 / 歌单被删光 / 从管理弹窗点播时都要清一遍。集中在一处，
+     * 免得以后新增字段又忘了清（控制栏手动挑的 `selectedQn` / `selectedAudioId`
+     * 就是这么漏掉过：换歌后还沿用上一首的档位）。
+     */
+    clearNowPlaying(): void {
+      this.stopDashSession();
+      // 真把上一首停下来：只清字段的话 <video> 会继续播旧流，
+      // 界面显示新歌名、耳朵里还是上一首
+      const v = this.videoEl();
+      if (v) {
+        try {
+          v.pause();
+          v.removeAttribute('src');
+          v.load();
+        } catch {
+          /* 忽略 */
+        }
+      }
+      this.videoUrl = '';
+      this.dashSource = null;
+      this.currentBvid = '';
+      this.videoName = '';
+      this.videoPic = '';
+      this.videoQuality = '';
+      this.videoQualityDesc = '';
+      this.audioQuality = '';
+      this.audioQualityDesc = '';
+      this.qualityOptions = null;
+      this.videoQualityPixels = '';
+      this.selectedQn = null;
+      this.selectedAudioId = null;
+      this.currentTime = 0;
+      this.duration = 0;
+      this.paused = true;
+      // 失败计数属于上一首，留着会让新歌的第一次错误被当成第二次（直接跳歌）
+      this._videoErrorCount = 0;
+      this.syncTrayState();
+    },
     playCurrent(seekTo = 0): void {
       if (this.songs.length === 0) return;
       // 续播时把起播点传给 changeSong，视频加载完成后会 seek 过去
-      if (seekTo > 0) this.seekAfterLoad = seekTo;
+      if (seekTo > 0) {
+        this.seekAfterLoad = seekTo;
+        this.seekAfterLoadFor = this.getSongName(this.currentIndex) ?? '';
+      }
       this.changeSong(this.currentIndex);
       this.resetRandomList();
       // 记录当前播放信息（歌单 / 下标 / 进度）
@@ -886,7 +933,67 @@ export default defineComponent({
           : '退出全屏,按F键可以再次进入全屏',
       );
     },
-    videoCanPlay(): void {},
+    /**
+     * 缓冲提示
+     *
+     * 显示时机只由 `<video>` 自己的信号决定（waiting / stalled / seeking / 换源），
+     * 不用 `readyState` 主动显示 —— 否则正常播放时也会闪一下。
+     * 隐藏则由「够播了」来判定（见 syncBufferState）。
+     */
+    onVideoBuffering(): void {
+      this.buffering = true;
+      this.syncBufferState();
+      this.startBufferTicker();
+    },
+    onVideoPlaying(): void {
+      this.buffering = false;
+      this.bufferPercent = 100;
+      this.stopBufferTicker();
+    },
+    /** 已经缓冲到第几秒（取最后一段的末尾；没数据返回 0） */
+    lastBufferedEnd(): number {
+      const el = this.videoEl();
+      if (!el || !el.buffered.length) return 0;
+      return el.buffered.end(el.buffered.length - 1);
+    },
+    /**
+     * 刷新缓冲百分比
+     *
+     * 量的是「离能播还差多少」，而不是「整条视频下载了多少」——
+     * 后者在限流之后会长时间停在很小的数字上，看着更像卡死。
+     *
+     * 关键：切歌/续播时播放点常常落在**已缓冲区间之外**（比如定位到 12.7 秒、
+     * 但只下到 5 秒），这时进度应该按「下载到播放点」算：
+     * 所以分子取「最后一段缓冲的末尾」，分母取「播放点 + 余量」。
+     */
+    syncBufferState(): void {
+      const el = this.videoEl();
+      if (!el) return;
+      const end = this.lastBufferedEnd();
+      this.bufferSeconds = Math.max(0, end - el.currentTime);
+      // 起播时目标是缓冲出 START_BUFFER_S 秒；播放中目标是「播放点 + LEAD_S」
+      const need = Math.max(el.currentTime + LEAD_S, START_BUFFER_S);
+      const ratio = end <= 0 ? 0 : end / need;
+      this.bufferPercent = Math.max(0, Math.min(99, Math.floor(ratio * 100)));
+
+      // 够播了就撤掉提示
+      if (el.readyState >= 3 && this.bufferSeconds >= 1) {
+        this.bufferPercent = 100;
+        this.buffering = false;
+        this.stopBufferTicker();
+      }
+    },
+    /** 缓冲期间每 250ms 刷新一次数字（`progress` 事件在 MSE 下不一定会持续触发） */
+    startBufferTicker(): void {
+      if (this._bufferTimer) return;
+      this._bufferTimer = setInterval(() => this.syncBufferState(), 250);
+    },
+    stopBufferTicker(): void {
+      if (this._bufferTimer) {
+        clearInterval(this._bufferTimer);
+        this._bufferTimer = null;
+      }
+    },
     /**
      * 视频加载失败
      *
@@ -933,15 +1040,27 @@ export default defineComponent({
         // 关键修复：原来只在 isMuted 为真时写 true，解除静音后不会写回 false，
         // 导致「图标显示有声、实际没声」。这里始终跟随当前状态赋值。
         v.muted = this.isMuted;
-        // 续播：加载完成后再 seek，否则会被随后的加载覆盖
-        if (this.seekAfterLoad > 0) {
+        /**
+         * 续播 / 切清晰度后的定位
+         *
+         * `seekAfterLoad` 是**跨源共享**的字段，必须校验它是不是为「当前这首歌」设的：
+         * 否则「在 140 秒处切清晰度 -> 流还没加载完就切了歌」会把新歌
+         * 直接定位到 140 秒；新歌若比 140 秒短就越过 duration，
+         * 表现成「画面不动 / 直接到底」。
+         */
+        if (this.seekAfterLoad > 0 && this.seekAfterLoadFor === this.songName) {
           const target = this.seekAfterLoad;
           this.seekAfterLoad = 0;
+          this.seekAfterLoadFor = '';
           try {
             v.currentTime = target;
           } catch {
             /* 某些格式不支持 seek，忽略 */
           }
+        } else {
+          // 不是给这首歌设的，直接丢掉，别让它污染下一首
+          this.seekAfterLoad = 0;
+          this.seekAfterLoadFor = '';
         }
         this._videoErrorCount = 0;
         void v.play().catch(() => {});
@@ -959,6 +1078,12 @@ export default defineComponent({
     },
     /** 播放/暂停状态变化时同步给系统媒体控件 */
     onVideoPlayStateChange(): void {
+      // this.paused 必须跟着 <video> 走：它原先只在切歌/清空那几处被赋值，
+      // 播完一首或元素自己暂停时不会更新，于是图标和托盘仍显示「正在播放」，
+      // 用户第一次点播放键只是把它翻成 true（pause 空操作），要点第二次才真的重播。
+      const v = this.videoEl();
+      if (v) this.paused = v.paused;
+      this.syncTrayState();
       this.updateMediaSession();
     },
     videoUpDate(): void {
@@ -991,7 +1116,21 @@ export default defineComponent({
     },
     videoEnded(): void {
       if (this.currentMode == this.MODE.single) {
+        // 单曲循环：真的把播放位置拨回 0 再播，只改 this.currentTime 是没用的
+        // （<video> 播完就停在末尾，UI 还会一直显示「正在播放」）
+        const v = this.videoEl();
         this.currentTime = 0;
+        if (v) {
+          try {
+            v.currentTime = 0;
+          } catch {
+            /* 不支持 seek 就退化成重载 */
+          }
+          void v.play().catch(() => {});
+        }
+        this.paused = false;
+        this.syncTrayState();
+        this.updateMediaSession();
       } else {
         this.next();
       }
@@ -1022,8 +1161,13 @@ export default defineComponent({
     playControl(): void {
       const v = this.videoEl();
       if (!v) return;
-      if (this.paused) void v.play();
-      else v.pause();
+      if (this.paused) {
+        // play() 的 promise 必须吃掉：换源 / seek 会把它中断成 AbortError，
+        // 不 catch 就是一条「Uncaught (in promise)」噪音日志
+        void v.play().catch(() => {});
+      } else {
+        v.pause();
+      }
       this.paused = !this.paused;
       this.syncTrayState();
     },
@@ -1031,7 +1175,7 @@ export default defineComponent({
       const v = this.videoEl();
       if (!v) return;
       if (this.paused) {
-        void v.play();
+        void v.play().catch(() => {});
         this.paused = false;
       }
       v.currentTime = time;
@@ -1125,10 +1269,40 @@ export default defineComponent({
           break;
       }
     },
+    /**
+     * 把搜索结果按「像不像这首原曲」排序
+     *
+     * 抽出来是因为续播后台补列表也要用同一套排序，
+     * 两处各写一份迟早会不一致。
+     */
+    sortSearchedVideos(videos: BiliVideo[], songName: string): BiliVideo[] {
+      const keywords = songName.replace(/-/g, '').trim();
+      const parts = songName.split('-').map((s) => s.trim());
+      const realSongName = parts[0] || '';
+      const artistName = parts[1] || '';
+      return [...videos].sort((a, b) => {
+        const sa =
+          this.matchScore(a.title, keywords) + this.nameBonus(a.title, realSongName, artistName);
+        const sb =
+          this.matchScore(b.title, keywords) + this.nameBonus(b.title, realSongName, artistName);
+        return sb + this.tagBonus(b.title) - (sa + this.tagBonus(a.title));
+      });
+    },
     async changeSong(index: number): Promise<void> {
       const songName = this.getSongName(index);
       if (!songName) return;
       const token = ++this._songToken;
+
+      /**
+       * 换歌 = 上一次「手动挑的清晰度 / 音质」作废
+       *
+       * 控制栏角标上的手动选择只针对**当前这一首**（README 里也是这么写的），
+       * 所以换歌时必须清掉，否则上一首临时挑的档位会一直粘到后面每一首 ——
+       * 表现就是「我上一首挑了 360P，下一首还是 360P」。
+       * 清掉后交给主进程用设置里的默认上限。
+       */
+      this.selectedQn = null;
+      this.selectedAudioId = null;
 
       // 先把「只依赖本地歌单」的信息立刻切过去。
       //
@@ -1138,8 +1312,16 @@ export default defineComponent({
       // 表现就是「切了歌，播放器里的歌曲图片和名称还是上一首的」。
       this.currentIndex = index;
       this.songName = songName;
-      // 视频信息属于上一首，先清掉：标题回退成歌名（见模板的 videoName || songName），
-      // 等搜索回来再换成真正的视频标题，绝不显示成「新歌配旧视频标题」
+      /**
+       * 视频信息属于上一首，先清掉：
+       *
+       * - `videoListKeyword` **不能**在这里就跟成新歌：`videoError` 靠
+       *   「`videoListKeyword` 是否等于 `songName`」判断这个错误是不是当前这首歌的，
+       *   提前改掉会让「上一首的视频报错」被算到新歌头上。
+       *   换清晰度 / 退 durl 需要关键字时统一用 `this.songName`（它就是搜索键）。
+       * - 标题回退成歌名（见模板的 `videoName || songName`），等搜索回来再换成真标题。
+       */
+      this.videoListKeyword = '';
       this.videoName = '';
       this.videoPic = '';
       this.videoQuality = '';
@@ -1148,36 +1330,34 @@ export default defineComponent({
       this.audioQualityDesc = '';
       this.qualityOptions = null;
       this.videoQualityPixels = '';
+      // 进度也属于上一首：不复位的话 playCurrent 会把上一首的秒数写进 resumeTime，
+      // 键盘 / SMTC 拖进度还会拿它去定位新歌
+      this.currentTime = 0;
+      this.duration = 0;
 
       try {
         const res = await electronApi.searchSong(songName);
         if (token !== this._songToken) return;
         // searchSong 的 data 形状由搜索接口决定，这里收敛成 BiliVideo
         const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
-        const keywords = songName.replace(/-/g, '').trim();
-        const parts = songName.split('-').map((s) => s.trim());
-        const realSongName = parts[0] || '';
-        const artistName = parts[1] || '';
-        videos.sort((a, b) => {
-          const sa =
-            this.matchScore(a.title, keywords) +
-            this.nameBonus(a.title, realSongName, artistName);
-          const sb =
-            this.matchScore(b.title, keywords) +
-            this.nameBonus(b.title, realSongName, artistName);
-          return sb + this.tagBonus(b.title) - (sa + this.tagBonus(a.title));
-        });
-        this.videoList = videos;
+        this.videoList = this.sortSearchedVideos(videos, songName);
         this.videoListKeyword = songName;
-        if (videos.length > 0) {
+        if (this.videoList.length > 0) {
           const selectedBvid =
-            (res.data as { selectedBvid?: string } | null)?.selectedBvid || videos[0].bvid;
+            (res.data as { selectedBvid?: string } | null)?.selectedBvid ||
+            this.videoList[0].bvid;
           await this.changeVideo(selectedBvid, songName);
         } else {
+          // 没搜到视频：把上一首的播放状态彻底停掉，别出现「新歌名 + 旧视频在播」
+          this.clearNowPlaying();
           this.$message.warning(`《${songName}》未找到视频`);
         }
       } catch (err) {
         if (token !== this._songToken) return;
+        // 搜索失败：列表清空 + 停掉上一首，别让「视频列表」里还挂着上一首的候选
+        this.videoList = [];
+        this.currentVideoIndex = -1;
+        this.clearNowPlaying();
         this.$message.error(`《${songName}》${this.errMsg(err)}`);
       }
     },
@@ -1209,6 +1389,20 @@ export default defineComponent({
           opts.audioId ?? this.selectedAudioId ?? undefined,
         );
         if (token !== this._videoToken) return; // 已有更新的请求，丢弃本次结果
+        /**
+         * 主进程解析失败时**不抛异常**，而是回 `{ videoUrl: null, error }`。
+         * 原来这里完全不看 `error`：既没有提示，`applyVideoSource()` 又因为
+         * videoUrl 为空什么都不做（旧视频接着播），可 currentBvid / 标题 / 清晰度
+         * 已经被换成这个失败视频的空值，还会把它的 bvid 记进 videoCache，
+         * 下次续播继续踩同一个坑。所以失败必须在这里拦住。
+         */
+        if (res.error && !res.videoUrl && !res.dash) {
+          // AUTH_FAILED 是主进程约定的「登录失效」错误码，给一句能照做的提示
+          if (res.error === 'AUTH_FAILED') {
+            throw new Error('B 站登录已失效，请重新登录后再试');
+          }
+          throw new Error(res.error);
+        }
         this.currentBvid = bvid;
         // dash 双轨（1080P+，需要 MSE 合成）与 durl（720P 混流）二选一
         this.dashSource = res.dash ?? null;
@@ -1237,14 +1431,30 @@ export default defineComponent({
         void this.recordCurrentVideo(bvid, keyword, this.videoName, this.videoPic);
       } catch (err) {
         if (token !== this._videoToken) return;
+        /**
+         * 解析失败时**必须把上一首的视频信息清掉**。
+         *
+         * 前面那几行是「解析成功才赋值」，失败时如果不清，控制栏会继续显示
+         * 上一首的视频标题 / 封面 / 清晰度 —— 用户切歌后看到的就是
+         * 「歌名换了，可标题封面还是上一条」，看起来像「信息不切换」。
+         * 清掉之后模板会退回显示歌名（`videoName || songName`），一眼能看出是解析失败了。
+         */
+        this.videoName = '';
+        this.videoPic = '';
+        this.videoQuality = '';
+        this.videoQualityDesc = '';
+        this.audioQuality = '';
+        this.audioQualityDesc = '';
+        this.qualityOptions = null;
+        this.videoQualityPixels = '';
         this.$message.error(this.errMsg(err));
       }
     },
     /**
      * 手动切换清晰度 / 音质
      *
-     * 选择只作用于**本次会话**（`selectedQn` / `selectedAudioId`），
-     * 不改设置里的默认值 —— 默认值在设置界面里改。
+     * 选择只作用于**当前这一首**（`selectedQn` / `selectedAudioId`，换歌时在
+     * `changeSong` 里清掉），不改设置里的默认值 —— 默认值在设置界面里改。
      * 重新解析会换掉流地址，所以先把播放进度记下来。
      */
     async switchQuality(kind: 'video' | 'audio', id: number): Promise<void> {
@@ -1254,7 +1464,10 @@ export default defineComponent({
       const bvid = this.currentBvid;
       if (!bvid) return;
       const resumeAt = this.currentTime;
-      if (resumeAt > 1) this.seekAfterLoad = resumeAt;
+      if (resumeAt > 1) {
+        this.seekAfterLoad = resumeAt;
+        this.seekAfterLoadFor = this.songName;
+      }
       await this.changeVideo(bvid, this.videoListKeyword || this.songName, {
         skipCache: true,
       });
@@ -1270,6 +1483,12 @@ export default defineComponent({
       const el = this.videoEl();
       if (!el) return;
       this.stopDashSession();
+
+      // 换源就要重新缓冲：先把提示亮出来，别让用户以为卡死了
+      this.buffering = true;
+      this.bufferPercent = 0;
+      this.bufferSeconds = 0;
+      this.startBufferTicker();
 
       const dash = this.dashSource;
       if (dash && DashSession.isSupported(dash)) {
@@ -1315,6 +1534,13 @@ export default defineComponent({
       }
       const bvid = this.currentBvid;
       if (!bvid) return;
+      // 换 durl 会重新加载视频，把当前进度记下来接着播
+      // （并标明是给这首歌设的，免得中途切歌后误用到别的歌上）
+      const resumeAt = this.currentTime;
+      if (resumeAt > 1) {
+        this.seekAfterLoad = resumeAt;
+        this.seekAfterLoadFor = this.songName;
+      }
       void this.changeVideo(bvid, this.videoListKeyword || this.songName, {
         skipCache: true,
         noDash: true,
@@ -1639,8 +1865,14 @@ export default defineComponent({
           v.volume = this.currentVolume / 100;
           v.muted = this.isMuted;
         }
-        // 定时同步策略现在挂在每个歌单上，所以歌单变化也要重建定时器
-        this.setupSyncTimer();
+        // 定时同步策略挂在每个歌单上：只有「有没有定时歌单 / 最小间隔」变了才重建定时器。
+        // 以前是无条件 setupSyncTimer()，而它会先 clear 再 setInterval ——
+        // 播放中每 5 秒就会广播一次 player.resumeTime，于是定时器被无限推迟，30 分钟的心跳永远等不到。
+        const syncKey = `${this.playlistsStore.hasIntervalSync}|${this.playlistsStore.minSyncInterval}`;
+        if (syncKey !== this._syncKey) {
+          this._syncKey = syncKey;
+          this.setupSyncTimer();
+        }
       },
       deep: true,
     },
@@ -1695,6 +1927,7 @@ export default defineComponent({
   },
   beforeUnmount() {
     this.stopDashSession();
+    this.stopBufferTicker();
     if (this.removeLoginListener) this.removeLoginListener();
     if (this.removeLogoutListener) this.removeLogoutListener();
     if (this.removeTrayPlayControl) this.removeTrayPlayControl();
@@ -1716,12 +1949,144 @@ export default defineComponent({
 </script>
 
 <style>
+/* #region 主题令牌（颜色 / 毛玻璃都靠这几个变量） */
+/*
+ * 分两组，别混用：
+ *  - `--glass-*`：**浮在视频上**的毛玻璃（控制栏、左上角歌单按钮、标题栏、全屏按钮）；
+ *  - `--panel-*`：**有实底**的面板（歌单下拉、设置 / 歌单管理 / 关于弹窗、歌曲列表）。
+ *
+ * 颜色来自设置里的两个取色器，由 `src/utils/uiTheme.ts` 写成 `r, g, b` 三个通道：
+ *  - `--glass-rgb`：玻璃/面板的底色（浅色主题默认 255,255,255）；
+ *  - `--text-rgb`：浮层上的文字颜色（默认也是白色）。
+ * 透明度由 `--glass-alpha`（设置里的「透明度」）组合进 rgba。
+ * 底色偏暗时 `uiTheme` 会给 html 加 `data-tint="dark"`，阴影自动换成白色。
+ */
+:root {
+  --glass-rgb: 255, 255, 255;
+  --text-rgb: 255, 255, 255;
+  --glass-alpha: 0.3;
+  --glass-alpha-strong: 0.42;
+  --glass-blur: 10px;
+  /* 文字阴影的模糊半径（设置里的「阴影强度」，8px = 默认那套） */
+  --glass-shadow-size: 8px;
+  /**
+   * 强调色
+   *
+   * 当前播放标记、同步转圈、B 站搜索关键词高亮这些「功能色」用它，
+   * 别在组件里散落一堆 #6f8cff / #d03050 —— 换主题时至少有个统一入口。
+   */
+  --accent: #6f8cff;
+  --accent-strong: #5b6fe0;
+  --accent-danger: #d03050;
+
+  /* —— 浮在视频上的毛玻璃 —— */
+  --glass-bg: rgba(var(--glass-rgb), var(--glass-alpha));
+  --glass-bg-strong: rgba(var(--glass-rgb), var(--glass-alpha-strong));
+  --glass-border: rgba(var(--text-rgb), 0.5);
+  --glass-radius: 12px;
+  --glass-text: rgb(var(--text-rgb));
+  --glass-text-dim: rgba(var(--text-rgb), 0.75);
+  /* 浅底 -> 黑阴影；近影是远影的一半，字号小的地方也不会糊成一团 */
+  --glass-shadow:
+    0 1px calc(var(--glass-shadow-size) * 0.5) rgba(0, 0, 0, 0.9),
+    0 0 var(--glass-shadow-size) rgba(0, 0, 0, 0.5);
+
+  /* —— 面板：同一套底色与 alpha，文字也跟设置走 —— */
+  --panel-bg: rgba(var(--glass-rgb), var(--glass-alpha));
+  --panel-border: rgba(var(--text-rgb), 0.28);
+  --panel-text: rgb(var(--text-rgb));
+  --panel-text-dim: rgba(var(--text-rgb), 0.78);
+  --panel-hover: rgba(var(--text-rgb), 0.16);
+  --panel-active: rgba(111, 140, 255, 0.35);
+  --panel-shadow: 0 10px 32px rgba(0, 0, 0, 0.25);
+  --panel-divider: rgba(var(--text-rgb), 0.18);
+
+  /**
+   * 浮层未悬停时的不透明度：**固定行为**，鼠标移上去变 1。
+   *
+   * 注意它跟设置里的「透明度」是两回事：
+   * 这个管的是「整个控件淡出到什么程度」，设置管的是「玻璃底有多透明」。
+   */
+  --ui-idle-opacity: 0.1;
+}
+/* 深底 -> 白阴影（底色深浅由 uiTheme 按亮度写进来） */
+html[data-tint='dark'] {
+  --glass-shadow:
+    0 0 var(--glass-shadow-size) rgba(255, 255, 255, 0.5),
+    0 1px calc(var(--glass-shadow-size) * 0.4) rgba(0, 0, 0, 0.5);
+  --panel-shadow: 0 10px 32px rgba(0, 0, 0, 0.7);
+}
+/* #endregion */
+
 #app {
   height: 100vh;
   margin: 0;
   padding: 0;
   overflow: hidden;
   user-select: none;
+}
+
+/*
+ * 所有 el-dialog 统一成同一套面板风格（歌单管理 / 设置两个弹窗）。
+ * 弹窗是 teleport 到 body 的，scoped 样式够不到，所以写在全局里。
+ *
+ * 文字是白色的（浅色主题偏白的面板底 + 黑阴影，深色主题偏黑的底 + 白阴影），
+ * 这样不管背后视频是亮是暗都看得清 —— 跟控制栏同一套做法。
+ */
+.el-dialog {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--glass-radius);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  color: var(--panel-text);
+  text-shadow: var(--glass-shadow);
+}
+.el-dialog .el-dialog__title,
+.el-dialog .el-dialog__header,
+.el-dialog .el-dialog__body {
+  color: var(--panel-text);
+}
+/*
+ * 这几个弹窗（设置 / 歌单管理 / 歌曲·视频列表）都不用右上角的叉号
+ * （`show-close=false`），关闭方式统一成「点弹窗外面的空白处」——
+ * Element Plus 默认行为，它要求 mousedown/mouseup 都落在遮罩上，
+ * 所以拖滑块松手在弹窗外不会误关。
+ *
+ * 提示写在**遮罩**上、弹窗下面：用遮罩的 ::after，一处生效三个弹窗都有。
+ * `pointer-events: none` 保证它不挡点击（点它等于点遮罩，照样关）。
+ */
+.el-overlay-dialog::after {
+  content: '点击空白位置关闭';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 4vh;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--glass-text);
+  text-shadow: var(--glass-shadow);
+  pointer-events: none;
+}
+/*
+ * Element Plus 自己的控件有实底（输入框、按钮、下拉），文字不能再叠阴影：
+ * 白底黑字加一圈黑阴影会发虚，像没对焦。
+ */
+.el-dialog .el-button,
+.el-dialog .el-input,
+.el-dialog .el-select,
+.el-dialog .el-textarea,
+.el-dialog .el-radio-group,
+.el-dialog .el-checkbox,
+.el-dialog .el-switch,
+.el-dialog .el-tag {
+  text-shadow: none;
+}
+.el-overlay {
+  background-color: rgba(0, 0, 0, 0.45);
 }
 #biliVideo {
   position: fixed;
@@ -1732,6 +2097,72 @@ export default defineComponent({
   object-fit: contain;
   z-index: 0;
 }
+
+/* #region 缓冲提示 */
+.buffer-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 26px;
+  border-radius: 14px;
+  /* 刻意压暗的 scrim：缓冲提示要压在视频上，文字再走 --glass-text */
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--glass-text);
+  pointer-events: none;
+  user-select: none;
+}
+.buffer-ring-wrap {
+  position: relative;
+  width: 76px;
+  height: 76px;
+}
+.buffer-ring {
+  width: 100%;
+  height: 100%;
+  /* 从 12 点方向顺时针画 */
+  transform: rotate(-90deg);
+}
+.ring-bg,
+.ring-fg {
+  fill: none;
+  stroke-width: 2.6;
+}
+.ring-bg {
+  stroke: rgba(var(--text-rgb), 0.18);
+}
+.ring-fg {
+  stroke: rgb(var(--text-rgb));
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.2s linear;
+}
+.buffer-percent {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: var(--glass-shadow);
+}
+.buffer-text {
+  font-size: 13px;
+  opacity: 0.92;
+}
+.buffer-sub {
+  font-size: 11px;
+  opacity: 0.6;
+}
+/* #endregion */
 
 .titlebar {
   position: fixed;
@@ -1770,21 +2201,18 @@ export default defineComponent({
   display: flex;
   align-items: center;
   font-size: 15px;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--glass-text);
   cursor: pointer;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.5),
-    0 0 8px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
   transition: background 0.15s;
   white-space: nowrap;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
 }
 .titlebar-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--glass-bg-strong);
 }
 
 .user-info {
@@ -1792,36 +2220,30 @@ export default defineComponent({
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.5),
-    0 0 8px rgba(0, 0, 0, 0.3);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
   border-radius: 16px;
   padding: 3px 12px 3px 3px;
   margin-left: 6px;
   transition: background 0.2s;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
 }
 .user-info:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: var(--glass-bg-strong);
 }
 .user-avatar {
   width: 28px;
   height: 28px;
   border-radius: 50%;
   object-fit: cover;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--glass-border);
 }
 .user-name {
-  color: white;
+  color: var(--glass-text);
   font-size: 13px;
   white-space: nowrap;
-  text-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.9),
-    0 0 8px rgba(0, 0, 0, 0.5);
+  text-shadow: var(--glass-shadow);
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1835,15 +2257,22 @@ export default defineComponent({
   justify-content: center;
   cursor: pointer;
   margin-left: 6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--glass-text);
   transition: background 0.15s;
   border-radius: 4px;
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.5),
-    0 0 8px rgba(0, 0, 0, 0.3);
+  text-shadow: var(--glass-shadow);
+  box-shadow: var(--glass-shadow);
 }
 .win-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--glass-bg-strong);
+}
+.win-btn .iconfont {
+  font-size: 15px;
+  line-height: 1;
+}
+/* 关闭图标笔画细，稍微放大一点才和别的按钮视觉等重 */
+.win-btn.win-close .iconfont {
+  font-size: 13px;
 }
 .win-close:hover {
   background: #e81123 !important;
@@ -1861,17 +2290,23 @@ export default defineComponent({
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--glass-text);
+  /* 和别的浮层同一套毛玻璃令牌（受设置里的透明度 / 模糊强度控制） */
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  text-shadow: var(--glass-shadow);
   transition: all 0.2s;
   opacity: 0.2;
 }
 .fullscreen-btn:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--glass-bg-strong);
+}
+.fullscreen-btn .iconfont {
+  font-size: 20px;
+  line-height: 1;
 }
 </style>

@@ -123,7 +123,13 @@ const getHost = (url: string): string => {
  */
 export const detectSource = (input: string): MusicSource | null => {
   const text = input.trim()
-  // 纯数字 / digest 形式：信息不足，交给调用方指定音源
+  /**
+   * 酷我的 `digest-<n>__<id>` 是「链接被压缩过」的形式（分享出来的短串），
+   * 它既不含 `?&:/` 也不以字母开头以外的东西为线索，但前缀能确定是酷我：
+   * 不特判的话下面那行会直接 return null，酷我那条已经写好的解析分支永远走不到。
+   */
+  if (/^digest-\d+__\d+$/.test(text)) return 'kw'
+  // 纯数字 / 其它 digest 形式：信息不足，交给调用方指定音源
   if (!/[a-zA-Z]/.test(text) || !/[?&:/]/.test(text)) return null
 
   const host = getHost(text)
@@ -165,28 +171,6 @@ export const toParsedSong = (
     cover,
     source,
   }
-}
-
-/** 歌单地址里带 `###token` 时的拆分结果 */
-export interface ParsedInput {
-  /** 去掉 token 后的链接或 ID */
-  value: string
-  /** 网易云专用：`MUSIC_U` token */
-  token: string | null
-}
-
-/**
- * 拆出 `链接###token` 中的 token
- *
- * 对应 LX 的 `getListId` 开头那段：网易云部分歌单（如私人雷达）
- * 需要注入 MUSIC_U 才能读取。
- */
-export const splitToken = (input: string): ParsedInput => {
-  const text = input.trim()
-  if (!text.includes('###')) return { value: text, token: null }
-  const [value, ...rest] = text.split('###')
-  const token = rest.join('###').trim()
-  return { value: value.trim(), token: token || null }
 }
 
 /**

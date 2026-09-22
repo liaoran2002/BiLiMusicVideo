@@ -6,10 +6,10 @@
  *  2. 避免把 90 多行类型定义塞进 SFC
  *  3. 配置相关的类型（AppSetting）来自主 / 渲染共用的 electron/common
  */
-import type { PlaylistSong, RemoveListener, UserInfo } from '@common/types/ipc'
+import type { RemoveListener } from '@common/types/ipc'
 import type { DashStreamsPayload, QualityOptionsPayload } from '@common/types/ipc'
 import type { DashSession } from '../utils/dashPlayer'
-import type { PlaylistSong as StructuredSong } from '@common/types/playlist'
+import type { PlaylistSong } from '@common/types/playlist'
 
 /** 循环模式下标（与 electron/common 的 PLAY_LOOP_MODES 顺序一致） */
 export interface LoopModeIndex {
@@ -52,7 +52,7 @@ export interface BiliVideo {
 export interface AppData {
   // ---- 歌单与播放 ----
   /** 当前歌单的曲目（结构化：含封面 / 专辑 / 歌手） */
-  songs: StructuredSong[]
+  songs: PlaylistSong[]
   videoList: BiliVideo[]
   /** `videoList` 属于哪一首歌（搜索键），用于判断列表是否已经跟上当前歌曲 */
   videoListKeyword: string
@@ -70,9 +70,9 @@ export interface AppData {
   audioQualityDesc: string
   /** 这个视频当前可选的清晰度 / 音质（播放器上的切换菜单用） */
   qualityOptions: QualityOptionsPayload | null
-  /** 本次会话手动选过的清晰度（null 表示用设置里的默认值） */
+  /** 当前这首歌手动选过的清晰度（null = 用设置里的默认上限；换歌时清空） */
   selectedQn: number | null
-  /** 本次会话手动选过的音质（null 表示用设置里的默认值） */
+  /** 当前这首歌手动选过的音质（null = 用设置里的默认上限；换歌时清空） */
   selectedAudioId: number | null
   videoUrl: string
   /** dash 双轨信息（非空时用 MSE 播放；只有 durl 时为空） */
@@ -148,21 +148,33 @@ export interface AppData {
   // ---- 歌单 / 续播 ----
   /** 设置弹窗是否可见 */
   settingsVisible: boolean
+  /** 关于弹窗是否可见 */
+  aboutVisible: boolean
   /** 视频请求竞态令牌（切视频时防乱序覆盖） */
   _videoToken: number
   /** 同一个视频的连续失败次数，达到上限就跳过该曲，避免无限重试 */
   _videoErrorCount: number
   /** 视频加载完成后要跳转到的秒数（续播用） */
   seekAfterLoad: number
+  /** `seekAfterLoad` 是为哪一首歌设的，防止跨歌曲误用 */
+  seekAfterLoadFor: string
+  /** 是否正在缓冲（换源 / 拖动后 MSE 重新拉流的那段） */
+  buffering: boolean
+  /** 缓冲百分比（0-100，朝「够播」推进） */
+  bufferPercent: number
+  /** 播放位置之后已缓冲的秒数 */
+  bufferSeconds: number
+  /** 缓冲百分比的定时刷新句柄 */
+  _bufferTimer: ReturnType<typeof setInterval> | null
   /** 上次写入播放进度的时间戳（节流用） */
   _lastPersistAt: number
   /** 上次同步 SMTC 进度的时间戳（节流用） */
   _lastMediaPosAt: number
   /** 定时自动同步的定时器 */
   _syncTimer: ReturnType<typeof setInterval> | null
+  /** 定时器对应的「策略指纹」（有没有定时歌单 + 最小间隔），用来避免无关的配置广播反复重建定时器 */
+  _syncKey: string
 }
-
-export type { PlaylistSong, UserInfo }
 
 /**
  * 模板里 <video ref="video"> 的最小接口
@@ -175,6 +187,10 @@ export interface VideoElement {
   src: string
   /** MSE 缓冲区裁剪时要用 */
   readonly buffered: TimeRanges
+  /** 停滞看门狗用：0=HAVE_NOTHING … 4=HAVE_ENOUGH_DATA */
+  readonly readyState: number
+  readonly paused: boolean
+  readonly seeking: boolean
   volume: number
   muted: boolean
   currentTime: number
@@ -184,4 +200,7 @@ export interface VideoElement {
   readonly videoHeight: number
   play(): Promise<void>
   pause(): void
+  /** 停掉当前流（清空播放信息时用：pause + removeAttribute('src') + load()） */
+  removeAttribute(name: string): void
+  load(): void
 }

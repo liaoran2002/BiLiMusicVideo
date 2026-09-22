@@ -14,9 +14,6 @@
  */
 export const SETTING_VERSION = '1.0.0'
 
-/** setting.json 中 version 字段低于此版本的数据需要迁移 */
-export const MIN_SUPPORT_SETTING_VERSION = '1.0.0'
-
 /** 应用数据目录（userData）下的文件名 */
 export const STORE_NAMES = {
   APP_SETTINGS: 'setting',
@@ -28,6 +25,53 @@ export const STORE_NAMES = {
 
 /** 播放循环模式：列表循环 / 单曲循环 / 随机播放 */
 export const PLAY_LOOP_MODES = ['listLoop', 'singleLoop', 'random'] as const
+
+/** 界面颜色（hex）的取值范围与默认值 */
+export const DEFAULT_THEME_COLOR = '#ffffff'
+export const DEFAULT_FONT_COLOR = '#ffffff'
+/** 只接受 `#RGB` / `#RRGGBB`（大小写都行） */
+export const COLOR_HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
+/**
+ * 玻璃底色深浅的分界：亮度低于这个值就当「深色底」
+ *
+ * 深色底要配白阴影 + Element Plus 暗色，浅色底配黑阴影 + 亮色，
+ * 这样用户随便挑颜色都不会出现「白底白字看不出字」。
+ */
+export const DARK_TINT_LUMINANCE = 0.5
+
+/**
+ * 透明度的取值范围与步进
+ *
+ * 数值就是玻璃底色 `rgba(255, 255, 255, x)` 里的那个 x（百分比）：
+ * 30 = `rgba(255,255,255,0.3)`。控制栏、歌单按钮、弹窗、歌单下拉都用它。
+ */
+export const GLASS_TRANSPARENCY_MIN = 0
+export const GLASS_TRANSPARENCY_MAX = 100
+/** 滑块一档 5%：默认步进太细，拖起来对不齐 */
+export const GLASS_TRANSPARENCY_STEP = 5
+
+/**
+ * 模糊强度
+ *
+ * 界面上的滑块是百分比（0-100%，5% 一档），**存的是 0-20 的像素值**：
+ * 百分比 / 5 = px。所以 50% = 10px。
+ */
+export const GLASS_BLUR_MIN = 0
+export const GLASS_BLUR_MAX = 20
+export const GLASS_BLUR_PERCENT_STEP = 5
+/** 1px 对应界面上 5% */
+export const GLASS_BLUR_PERCENT_PER_PX = 5
+
+/**
+ * 阴影强度（文字阴影的模糊半径）
+ *
+ * 和模糊强度一个套路：滑块是百分比（0-100%，5% 一档），**存的是 0-20 的像素值**（百分比 / 5）。
+ * 8px 就是默认那套「0 1px 4px + 0 0 8px」。
+ */
+export const GLASS_SHADOW_MIN = 0
+export const GLASS_SHADOW_MAX = 20
+export const GLASS_SHADOW_PERCENT_STEP = 5
+export const GLASS_SHADOW_PERCENT_PER_PX = 5
 
 /** 歌单集合数据的版本号（playlists.json 里的 version 字段） */
 export const PLAYLIST_DATA_VERSION = '1.0.0'

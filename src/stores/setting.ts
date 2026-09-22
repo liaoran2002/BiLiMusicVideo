@@ -35,8 +35,6 @@ export const useSettingStore = defineStore('setting', () => {
   const setting = ref<AppSetting>(structuredClone(defaultSetting))
   /** 是否已完成首次拉取 */
   const loaded = ref(false)
-  /** 是否正在与主进程通信（避免并发重复请求） */
-  let loadingPromise: Promise<void> | null = null
 
   /**
    * 用局部配置合并进本地副本
@@ -52,23 +50,16 @@ export const useSettingStore = defineStore('setting', () => {
     setting.value = merged
   }
 
-  /** 从主进程拉取完整配置 */
+  /**
+   * 从主进程拉取完整配置
+   *
+   * 加载时机只有一处（`src/main.ts` 在 mount 之前 await 它），
+   * 所以不需要再包一层「幂等 ensureLoaded」—— 那套包装全项目没人调用，已经删掉。
+   */
   const load = async (): Promise<void> => {
     const data = await api.getSetting()
     setting.value = toPlain(data)
     loaded.value = true
-  }
-
-  /**
-   * 确保已加载（幂等）
-   * 并发调用时复用同一个请求，避免多个组件重复拉取
-   */
-  const ensureLoaded = async (): Promise<void> => {
-    if (loaded.value) return
-    loadingPromise ??= load().finally(() => {
-      loadingPromise = null
-    })
-    await loadingPromise
   }
 
   /**
@@ -98,56 +89,25 @@ export const useSettingStore = defineStore('setting', () => {
     })
   }
 
-  // #region 便捷 getter / setter（让组件不用到处写魔法字符串）
-  const volume = computed({
-    get: () => setting.value['player.volume'],
-    set: (value: number) => {
-      void update({ 'player.volume': Math.min(100, Math.max(0, Math.round(value))) })
-    },
-  })
+  /**
+   * 配置项太多，组件里统一用 `setting['xxx.yyy']` 直接读，
+   * 不再为每一项都包一层 computed（那些包装全项目没人用，已经删掉：
+   * volume / isMute / loopMode / playIndex / wallpaperMode / ensureLoaded）。
+   */
 
-  const isMute = computed({
-    get: () => setting.value['player.isMute'],
-    set: (value: boolean) => {
-      void update({ 'player.isMute': value })
-    },
-  })
-
-  const loopMode = computed({
-    get: () => setting.value['player.loopMode'],
-    set: (value: AppSetting['player.loopMode']) => {
-      void update({ 'player.loopMode': value })
-    },
-  })
-
+  /**
+   * 配置项统一用 `setting['xxx.yyy']` 直接读，
+   * 只有标题关键词加权表留了一个 computed（App 的 `tagBonusConfig` 读它）。
+   * 之前为每一项都包了一层 volume / isMute / loopMode / playIndex / wallpaperMode，
+   * 全项目没人用，已经删掉。
+   */
   const tagBonus = computed(() => setting.value['player.tagBonus'])
-
-  const playIndex = computed({
-    get: () => setting.value['player.playIndex'],
-    set: (value: number) => {
-      void update({ 'player.playIndex': value })
-    },
-  })
-
-  const wallpaperMode = computed({
-    get: () => setting.value['common.wallpaperMode'],
-    set: (value: boolean) => {
-      void update({ 'common.wallpaperMode': value })
-    },
-  })
-  // #endregion
 
   return {
     setting,
     loaded,
-    volume,
-    isMute,
-    loopMode,
     tagBonus,
-    playIndex,
-    wallpaperMode,
     load,
-    ensureLoaded,
     update,
     reset,
     startSync,

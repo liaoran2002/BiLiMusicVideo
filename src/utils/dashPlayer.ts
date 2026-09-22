@@ -8,12 +8,19 @@
  * 进度、音量、续播、SMTC 这些现有逻辑一行都不用改。
  *
  * 关于内存 / 配额（实测踩过的坑）：
- * 1080P60 的 4 分钟视频整条流约 150MB，正好顶到 Chromium 单个 SourceBuffer
- * 的配额，`appendBuffer` 会抛 `QuotaExceededError`，一旦不处理，
- * 之后再也塞不进任何数据、播放卡死。所以这里做两件事：
- *  1. **限流**：只往播放位置前面缓冲 `MAX_AHEAD_S` 秒，超了就等播放推进；
- *  2. **裁剪**：配额超限时丢掉播放位置之前的数据（保留 `KEEP_BEHIND_S` 秒回看），
- *     并按次数逐级加大丢弃幅度再重试。
+ * 1080P60 的视频整条流可以到上百 MB，会顶到 Chromium 单个 SourceBuffer 的配额，
+ * `appendBuffer` 抛 `QuotaExceededError`，一旦不处理之后再也塞不进任何数据、
+ * **播放卡死**。所以这里做三件事：
+ *  1. **前向限流**：只往播放位置前面缓冲 `MAX_AHEAD_S` 秒，超了就等播放推进；
+ *  2. **配额兜底**：真撞上配额时丢掉 `KEEP_BEHIND_S` 秒之前的数据再重试，
+ *     并按 `KEEP_BEHIND_STEPS` 递减；
+ *  3. **不切到播放点跟前**：递减有 15 秒下限 —— 离播放位置太近的 `remove()`
+ *     会让解码器打嗝甚至停住。
+ *
+ * 注意这里**不做「每轮 append 都主动裁剪」**：m4s 是顺序下载的，
+ * 裁掉的数据拿不回来，主动裁会把回拖窗口压得很小，
+ * 用户往回拖超出窗口就只能干等（顺序下载永远追不上）。
+ * 宁可让缓冲区涨到配额再一次性回收。
  */
 
 /** DashSession 需要的媒体元素能力（项目里用的是精简的 VideoElement 接口） */
@@ -21,6 +28,9 @@ export interface MediaElementLike {
   src: string
   readonly currentTime: number
   readonly buffered: TimeRanges
+  readonly readyState: number
+  readonly paused: boolean
+  readonly seeking: boolean
 }
 
 export interface DashSource {
@@ -34,12 +44,18 @@ export interface DashSource {
 
 /** 往播放位置前面最多缓冲多少秒（控制内存） */
 const MAX_AHEAD_S = 30
-/** 配额超限裁剪时，播放位置之前保留多少秒供回拖 */
+/**
+ * 配额超限时，播放位置之前保留多少秒供回拖
+ *
+ * 留大一点：裁掉的数据拿不回来，窗口越大能回拖的范围越大。
+ */
 const KEEP_BEHIND_S = 90
-/** 裁剪重试时的递减保留秒数 */
-const KEEP_BEHIND_STEPS = [KEEP_BEHIND_S, 45, 20, 8, 2, 0]
+/** 配额兜底时的递减档位；**不降到 15 秒以下**，太靠近播放点的 remove 会让解码器打嗝 */
+const KEEP_BEHIND_STEPS = [KEEP_BEHIND_S, 60, 40, 25, 15]
 /** SourceBuffer 空闲等待的超时（避免异常情况下永久挂住） */
 const UPDATE_TIMEOUT_MS = 15000
+/** 播放中连续多少毫秒不推进就打一次停滞日志（只用于排查，不干预播放） */
+const STALL_WARN_MS = 12000
 
 /** SourceBuffer 配额超限（缓冲区放不下了）*/
 const isQuotaError = (err: unknown): boolean =>
@@ -60,6 +76,10 @@ export class DashSession {
   private objectUrl: string | null = null
   private tasks: TrackTask[] = []
   private stopped = false
+  /** 停滞看门狗：上次看到的播放位置与时间戳 */
+  private lastTime = -1
+  private lastProgressAt = 0
+  private watchdog: ReturnType<typeof setInterval> | null = null
 
   constructor(el: MediaElementLike) {
     this.el = el
@@ -132,6 +152,7 @@ export class DashSession {
       { buffer: videoBuffer, url: source.videoUrl, controller: new AbortController() },
       { buffer: audioBuffer, url: source.audioUrl, controller: new AbortController() },
     ]
+    this.startWatchdog(videoBuffer)
 
     // 两条流并行拉取，互不阻塞
     const results = await Promise.allSettled(this.tasks.map((t) => this.pump(t)))
@@ -243,9 +264,8 @@ export class DashSession {
     if (!buffer.buffered.length) return false
     const start = buffer.buffered.start(0)
     const now = this.el.currentTime
-    let cutTo = Math.max(start, now - keepBehind)
-    // keepBehind 为 0 或播放位置紧贴缓冲区起点时，退一步：丢到播放位置前 1 秒
-    if (cutTo - start < 1) cutTo = Math.max(start, now - 1)
+    const cutTo = Math.max(start, now - keepBehind)
+    // 留不出 1 秒可丢的就不动它 —— 宁可这次不腾空间，也不要切到播放点跟前
     if (cutTo - start < 1) return false
 
     await this.waitIdle(buffer)
@@ -270,9 +290,57 @@ export class DashSession {
     return true
   }
 
+  /**
+   * 停滞看门狗：播放中长时间不推进就记一条日志
+   *
+   * 只打日志、不干预播放。下次出现「不动」时，这条日志能直接说明
+   * 是缓冲区空了、还是元素自己停了。
+   */
+  private startWatchdog(buffer: SourceBuffer): void {
+    this.stopWatchdog()
+    this.lastTime = -1
+    this.lastProgressAt = Date.now()
+    this.watchdog = setInterval(() => {
+      if (this.stopped) return
+      const now = Date.now()
+      const t = this.el.currentTime
+      // 暂停 / 拖动 / 还没起播都不算停滞
+      if (this.el.paused || this.el.seeking || this.el.readyState < 2) {
+        this.lastProgressAt = now
+        this.lastTime = t
+        return
+      }
+      if (this.lastTime < 0 || Math.abs(t - this.lastTime) > 0.25) {
+        this.lastTime = t
+        this.lastProgressAt = now
+        return
+      }
+      if (now - this.lastProgressAt >= STALL_WARN_MS) {
+        const ranges: string[] = []
+        for (let i = 0; i < buffer.buffered.length; i++) {
+          ranges.push(`[${buffer.buffered.start(i).toFixed(1)},${buffer.buffered.end(i).toFixed(1)}]`)
+        }
+        console.warn(
+          `[mse] 播放停滞 ${Math.round((now - this.lastProgressAt) / 1000)}s：` +
+            `t=${t.toFixed(1)} readyState=${this.el.readyState} buffered=${ranges.join(' ') || '空'}`,
+        )
+        // 打过一次就重置，免得刷屏
+        this.lastProgressAt = now
+      }
+    }, 2000)
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdog) {
+      clearInterval(this.watchdog)
+      this.watchdog = null
+    }
+  }
+
   /** 停止并清理（换源 / 切歌 / 组件卸载时务必调用） */
   stop(): void {
     this.stopped = true
+    this.stopWatchdog()
     for (const t of this.tasks) {
       try {
         t.controller.abort()

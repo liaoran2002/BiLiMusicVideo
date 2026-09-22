@@ -8,7 +8,13 @@
  *
  * 参考 LX Music 的 src/common/defaultSetting.ts
  */
-import { DEFAULT_AUDIO_ID, DEFAULT_VIDEO_QN, SETTING_VERSION } from './constants'
+import {
+  DEFAULT_AUDIO_ID,
+  DEFAULT_FONT_COLOR,
+  DEFAULT_THEME_COLOR,
+  DEFAULT_VIDEO_QN,
+  SETTING_VERSION,
+} from './constants'
 import type { AppSetting } from './types/app_setting'
 
 const defaultSetting = {
@@ -16,15 +22,31 @@ const defaultSetting = {
 
   // #region common
   'common.wallpaperMode': false,
-  'common.startupAutoPlay': false,
-  'common.windowSizeId': 0,
+  /** 玻璃底色：默认白色（浅色主题那套观感） */
+  'common.themeColor': DEFAULT_THEME_COLOR,
+  /** 浮层文字颜色：默认白色 */
+  'common.fontColor': DEFAULT_FONT_COLOR,
+  /**
+   * 透明度：玻璃底色 `rgba(255,255,255,x)` 里的 x（百分比）
+   * 30 = `rgba(255,255,255,0.3)`，和加这个设置之前的观感一致
+   */
+  'common.glassTransparency': 30,
+  /**
+   * 模糊强度：`backdrop-filter: blur(Npx)` 的 N（0-20）
+   * 界面上显示成百分比（50% = 10px），存的是这个 px 值
+   */
+  'common.glassBlur': 10,
+  /**
+   * 阴影强度：文字阴影的模糊半径（0-20 px，界面显示成百分比：8px = 40%）
+   * 8 就是原来的「0 1px 4px + 0 0 8px」
+   */
+  'common.glassShadow': 8,
   // #endregion
 
   // #region player
   'player.volume': 70,
   'player.isMute': false,
   'player.loopMode': 'listLoop',
-  'player.isSavePlayIndex': true,
   'player.playIndex': 0,
   /** 自动续播：下次打开恢复到上次的歌单/歌曲/进度 */
   'player.resumeOnStart': true,

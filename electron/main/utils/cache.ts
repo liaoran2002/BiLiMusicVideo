@@ -11,9 +11,11 @@
  *  3. 维护一份轻量内存索引，避免为了淘汰而频繁 stat 整个目录
  */
 import { app } from 'electron'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { getSetting } from './setting'
+import { writeJsonAtomic } from './atomicJson'
 import type { CacheStats } from '@common/types/cache_stats'
 
 export interface CacheEntry<T = unknown> {
@@ -21,6 +23,8 @@ export interface CacheEntry<T = unknown> {
   timestamp: number
   /** 最后一次被读取的时间（LRU 依据）；老数据可能没有 */
   lastUsed?: number
+  /** 关键词原文：文件名是它的 md5，读出来对一下，避免极端的撞名 */
+  keyword?: string
   data: T
 }
 
@@ -53,10 +57,19 @@ const getCacheDir = (): string => {
   return dir
 }
 
-/** 关键词里可能包含非法文件名字符，落盘前先清洗 */
-const sanitizeFilename = (keyword: string): string => keyword.replace(/[\\/:*?"<>|]/g, '')
-
-const fileNameOf = (keyword: string): string => `${sanitizeFilename(keyword)}.json`
+/**
+ * 缓存文件名 = 关键词的 md5
+ *
+ * 不能只做「清洗非法字符」：`"A/B"` 与 `"AB"`、`"夜曲:前奏"` 与 `"夜曲前奏"`
+ * 清洗后会落到同一个文件，两个关键词的搜索结果互相串味；
+ * 全是非法字符的关键词会落到 `.json`，超长关键词还会 ENAMETOOLONG（save 静默失败）。
+ * md5 之后长度固定、字符集安全，关键词原文留在 entry 里，读出来对不上就当未命中。
+ *
+ * 改命名时**不做旧文件迁移**：`search-cache/` 里全是搜索缓存，重新搜一次的成本
+ * 远低于维护一条兼容分支 —— 需要的话直接在设置里「全部清除」。
+ */
+const fileNameOf = (keyword: string): string =>
+  `${createHash('md5').update(keyword, 'utf8').digest('hex')}.json`
 
 /**
  * 首次使用时建立索引
@@ -200,6 +213,32 @@ export async function get<T = unknown>(keyword: string): Promise<CacheEntry<T> |
 
     const raw = fs.readFileSync(filePath, 'utf-8')
     const entry = JSON.parse(raw) as CacheEntry<T>
+    /**
+     * 坏条目兜底：没有 `data` 的缓存等于空。
+     *
+     * 曾经踩过：`save()` 里传了 `undefined`，`JSON.stringify` 会把 `data` 字段整个丢掉，
+     * 于是磁盘上留下 `{"timestamp":…,"keyword":…}` 这种文件，之后每次读到它都会
+     * 在下游炸出 `Cannot read properties of undefined (reading 'data')`。
+     * 读到就顺手删掉，让它自愈。
+     */
+    if (entry == null || typeof entry !== 'object' || entry.data == null) {
+      removeFile(file)
+      return null
+    }
+    /**
+     * 形状检查：搜索缓存里存的必须是**整包 B 站返回体**（带 `code`）。
+     *
+     * 曾经有一版构建把里层的 `data` 存了进来（`{result, selectedBvid}`），
+     * 这种条目少了 `code`，下游 `payload.data.result` 会取不到、每次都得重新联网。
+     * 认出来就直接删掉，让下一次写入恢复正常形状。
+     */
+    const payload = entry.data as { code?: unknown } | null
+    if (payload === null || typeof payload !== 'object' || typeof payload.code !== 'number') {
+      removeFile(file)
+      return null
+    }
+    // 文件名是关键词的 md5；entry 里也存了原文，对不上就当未命中（理论上不会发生）
+    if (typeof entry.keyword === 'string' && entry.keyword !== keyword) return null
 
     // 关键修复：maxAge 之前完全没被使用过
     const maxAge = Number(getSetting()['cache.maxAge']) || 0
@@ -234,9 +273,10 @@ export async function save(keyword: string, data: unknown): Promise<boolean> {
     const cacheData: CacheEntry = {
       timestamp: now,
       lastUsed: now,
+      keyword,
       data,
     }
-    fs.writeFileSync(filePath, JSON.stringify(cacheData), 'utf-8')
+    writeJsonAtomic(filePath, cacheData)
     index.set(file, { file, lastUsed: now })
 
     // 写完之后顺手淘汰，保证目录不会无限长大

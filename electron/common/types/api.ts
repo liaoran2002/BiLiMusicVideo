@@ -16,7 +16,6 @@
 import type { AppSetting } from './app_setting'
 import type {
   DragOffset,
-  Playlist,
   RemoveListener,
   TrayState,
   UserInfo,
@@ -40,7 +39,6 @@ export interface RendererAPI {
 
   // #region 登录
   startLogin: () => Promise<void>
-  reLogin: () => Promise<void>
   setLoggedIn: (loggedIn: boolean) => Promise<void>
   executeLogout: () => Promise<void>
   onLogout: (cb: () => void) => RemoveListener
@@ -95,8 +93,6 @@ export interface RendererAPI {
   // #endregion
 
   // #region 歌单 / 缓存
-  getPlaylist: () => Promise<Playlist | null>
-  savePlaylist: (data: Playlist) => Promise<boolean>
   /** 读取歌单集合（多歌单） */
   getPlaylists: () => Promise<import('./playlist').PlaylistStoreData>
   /** 整体保存歌单集合（增删改后调用） */
@@ -106,7 +102,6 @@ export interface RendererAPI {
   /** 同步指定歌单，返回每个歌单的结果 */
   syncPlaylists: (ids: string[]) => Promise<import('./playlist').SyncResult[]>
   clearCache: () => Promise<boolean>
-  clearSingleCache: (keyword: string) => Promise<boolean>
   /** 缓存统计（文件数 / 占用） */
   getCacheStats: () => Promise<import('./cache_stats').CacheStats>
   /** 手动触发一次「过期 + LRU」清理 */
@@ -125,6 +120,11 @@ export interface RendererAPI {
   winGetScreenWorkArea: () => Promise<ScreenWorkArea | null>
   onMaximized: (cb: (val: boolean) => void) => RemoveListener
   onFullscreen: (cb: (val: boolean) => void) => RemoveListener
+  // #endregion
+
+  // #region 应用
+  /** 用系统默认浏览器打开链接（只允许 http/https） */
+  openExternal: (url: string) => Promise<boolean>
   // #endregion
 
   // #region 壁纸

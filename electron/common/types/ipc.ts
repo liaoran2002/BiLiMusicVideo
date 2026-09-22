@@ -72,9 +72,13 @@ export interface IpcChannelMap {
 
   // #region auth
   'auth:startLogin': { params: void; result: void }
-  'auth:reLogin': { params: void; result: void }
   'auth:setLoggedIn': { params: { loggedIn: boolean }; result: void }
   'auth:executeLogout': { params: void; result: void }
+  // #endregion
+
+  // #region app
+  /** 用系统默认浏览器打开链接（只允许 http/https），返回是否真的打开了 */
+  'app:openExternal': { params: { url: string }; result: boolean }
   // #endregion
 
   // #region bilibili api
@@ -124,10 +128,6 @@ export interface IpcChannelMap {
   // #endregion
 
   // #region playlist
-  /** @deprecated 旧版单歌单接口，保留兼容；新代码请用 playlists:* */
-  'playlist:get': { params: void; result: Playlist | null }
-  /** @deprecated 旧版单歌单接口 */
-  'playlist:save': { params: Playlist; result: boolean }
   /** 读取歌单集合 */
   'playlists:get': { params: void; result: import('./playlist').PlaylistStoreData }
   /** 整体保存歌单集合（增删改后调用） */
@@ -144,7 +144,6 @@ export interface IpcChannelMap {
 
   // #region cache
   'cache:clearAll': { params: void; result: boolean }
-  'cache:clearSingle': { params: { keyword: string }; result: boolean }
   /** 缓存统计（文件数 / 占用字节） */
   'cache:getStats': {
     params: void
@@ -219,12 +218,6 @@ export type PlaylistSong = string
 export interface Playlist {
   name: string
   songs: PlaylistSong[]
-}
-
-/** 兼容保留：极少数情况下需要服务端返回结构化的 {name, songs} */
-export interface SongList {
-  name?: string
-  songs?: PlaylistSong[]
 }
 
 export interface TrayState {

@@ -343,7 +343,3 @@ export const syncPlaylists = async (
   }
   return results
 }
-
-/** 取所有需要「启动时同步」的歌单 id */
-export const getStartupSyncIds = (): string[] =>
-  data.playlists.filter((p) => p.sync.mode === 'startup').map((p) => p.id)

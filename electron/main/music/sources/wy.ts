@@ -101,7 +101,7 @@ const mapSongs = (songs: WySong[] | undefined): ParsedSong[] => {
 }
 
 /** 歌单链接 / ID -> 纯数字歌单 id（并拆出可选 token） */
-export const getListId = async (
+const getListId = async (
   rawInput: string,
 ): Promise<{ id: string; token: string | null }> => {
   let input = rawInput.trim()

@@ -1,65 +1,78 @@
 <template>
-  <div id="songListPanel" v-show="listType != 'none'">
-    <div id="listMask" @click="$emit('showList', 'none')"></div>
-    <div class="list" :class="{ wide: isSongList }">
+  <!--
+    歌曲 / 视频列表
+
+    和设置、歌单管理一样是 el-dialog：
+    右上角没有叉号（show-close=false），点弹窗外面的空白处关闭；
+    「点击空白位置关闭」的提示由 App.vue 里遮罩的 ::after 统一提供。
+  -->
+  <el-dialog
+    :model-value="listType != 'none'"
+    :show-close="false"
+    :width="isSongList ? '56vw' : '50vw'"
+    align-center
+    @update:model-value="onVisibleChange"
+  >
+    <template #header>
       <div class="listTitle">
         <span class="lt-name">{{ title }}</span>
         <span class="lt-count">{{ list.length }} 项</span>
       </div>
-      <div class="listBody" ref="listBody">
-        <ul class="lists">
-          <li
-            v-for="(item, index) in list"
-            :key="index"
-            :ref="(el) => setItemRef(index, el)"
-            :class="{ active: index === currentIndex }"
-            @click="onItemClick(item, index)"
-          >
-            <div class="index">{{ index + 1 }}</div>
+    </template>
 
-            <!-- 封面：歌单取平台专辑图，视频取 B 站缩略图 -->
-            <div class="cover">
-              <img
-                v-if="coverOf(item) && !failedCovers[coverOf(item) as string]"
-                :src="coverOf(item) as string"
-                :alt="nameOf(item)"
-                referrerpolicy="no-referrer"
-                loading="lazy"
-                @error="onCoverError($event)"
-              />
-              <div v-else class="cover-fallback">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M6 12V4l7-1.5V10"
-                    stroke="currentColor"
-                    stroke-width="1.2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                  <circle cx="4.5" cy="12" r="1.8" stroke="currentColor" stroke-width="1.2" />
-                  <circle cx="11.5" cy="10" r="1.8" stroke="currentColor" stroke-width="1.2" />
-                </svg>
-              </div>
+    <div id="songListPanel" class="listBody" ref="listBody">
+      <ul class="lists">
+        <li
+          v-for="(item, index) in list"
+          :key="index"
+          :ref="(el) => setItemRef(index, el)"
+          :class="{ active: index === currentIndex }"
+          @click="onItemClick(item, index)"
+        >
+          <div class="index">{{ index + 1 }}</div>
+
+          <!-- 封面：歌单取平台专辑图，视频取 B 站缩略图 -->
+          <div class="cover">
+            <img
+              v-if="coverOf(item) && !failedCovers[coverOf(item) as string]"
+              :src="coverOf(item) as string"
+              :alt="nameOf(item)"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              @error="onCoverError($event)"
+            />
+            <div v-else class="cover-fallback">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M6 12V4l7-1.5V10"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <circle cx="4.5" cy="12" r="1.8" stroke="currentColor" stroke-width="1.2" />
+                <circle cx="11.5" cy="10" r="1.8" stroke="currentColor" stroke-width="1.2" />
+              </svg>
             </div>
+          </div>
 
-            <!-- 文本区 -->
-            <div class="meta">
-              <div class="title" :title="plainTitleOf(item)" v-html="titleHtmlOf(item)"></div>
-              <div class="sub">
-                <span v-if="singerOf(item)" class="singer">{{ singerOf(item) }}</span>
-                <span v-if="albumOf(item)" class="album" :title="albumOf(item)">
-                  {{ albumOf(item) }}
-                </span>
-              </div>
+          <!-- 文本区 -->
+          <div class="meta">
+            <div class="title" :title="plainTitleOf(item)" v-html="titleHtmlOf(item)"></div>
+            <div class="sub">
+              <span v-if="singerOf(item)" class="singer">{{ singerOf(item) }}</span>
+              <span v-if="albumOf(item)" class="album" :title="albumOf(item)">
+                {{ albumOf(item) }}
+              </span>
             </div>
+          </div>
 
-            <!-- 时长 -->
-            <div v-if="durationOf(item)" class="duration">{{ durationOf(item) }}</div>
-          </li>
-        </ul>
-      </div>
+          <!-- 时长 -->
+          <div v-if="durationOf(item)" class="duration">{{ durationOf(item) }}</div>
+        </li>
+      </ul>
     </div>
-  </div>
+  </el-dialog>
 </template>
 
 <script lang="ts">
@@ -176,7 +189,8 @@ export default defineComponent({
   watch: {
     listType(val: string) {
       if (val !== 'none') {
-        this.$nextTick(() => this.scrollToActive());
+        // 弹窗挂载 + 过渡要一点时间，等一拍再滚到当前项
+        setTimeout(() => this.scrollToActive(), 120);
       }
     },
   },
@@ -232,6 +246,10 @@ export default defineComponent({
       if (this.isSongList) this.$emit('changeSong', index);
       else this.$emit('changeVideo', (item as VideoListItem).bvid, this.title);
     },
+    /** el-dialog 关掉时（点空白处 / Esc）通知父组件把 listType 置回 none */
+    onVisibleChange(visible: boolean): void {
+      if (!visible) this.$emit('showList', 'none');
+    },
     scrollToActive() {
       const el = this.itemRefs[this.currentIndex];
       if (el) {
@@ -243,45 +261,12 @@ export default defineComponent({
 </script>
 
 <style>
-.list {
-  text-align: center;
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  user-select: none;
-  background: rgba(255, 255, 255, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  border-radius: 12px;
-  padding: 30px;
-  min-width: 50vw;
-  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
-  transform: translate(-50%, -50%);
-  max-height: 50vh;
-  color: white;
-  opacity: 1;
-  visibility: visible;
-  transition:
-    opacity 0.5s ease,
-    visibility 0.5s ease;
-  z-index: 999;
-}
-/* 歌单模式内容更多，放宽一点 */
-.list.wide {
-  min-width: 56vw;
-  max-height: 62vh;
-}
-
+/*
+ * 外框（底色 / 圆角 / 模糊 / 白字 + 阴影）由 App.vue 里 `.el-dialog` 的全局样式提供，
+ * 这里只管列表内部。
+ */
 .listTitle {
-  color: #000;
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  padding: 15px 0;
-  background: rgba(255, 255, 255, 0.5);
-  border-radius: 12px 12px 0 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
-  z-index: 1;
+  color: inherit;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -299,29 +284,9 @@ export default defineComponent({
   opacity: 0.55;
 }
 
-#listMask {
-  position: fixed;
-  top: 0;
-  left: 0;
-  height: 100vh;
-  width: 100vw;
-  opacity: 0.5;
-  background-color: rgba(0, 0, 0, 0.5);
-  z-index: 1;
-}
-
-.show {
-  visibility: hidden;
-  opacity: 0;
-}
-
 .listBody {
-  margin-top: 25px;
-  max-height: 50vh;
-  overflow-y: auto;
-}
-.list.wide .listBody {
   max-height: 56vh;
+  overflow-y: auto;
 }
 
 .lists {
@@ -335,9 +300,8 @@ export default defineComponent({
   align-items: center;
   gap: 10px;
   text-align: left;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  color: #000;
+  /* 文字颜色/阴影都从 `.el-dialog` 继承（白字 + 主题对应的阴影） */
+  color: inherit;
   margin: 1% 0;
   padding: 6px 8px;
   border-radius: 8px;
@@ -345,7 +309,7 @@ export default defineComponent({
   transition: background 0.15s;
 }
 .lists li:hover {
-  background: rgba(255, 255, 255, 0.35);
+  background: var(--panel-hover);
 }
 
 .lists .index {
@@ -355,9 +319,9 @@ export default defineComponent({
   padding: 4px 0;
   border-radius: 4px;
   font-size: 12px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(0, 0, 0, 0.3);
-  color: white;
+  background: rgba(var(--text-rgb), 0.16);
+  border: 1px solid rgba(var(--text-rgb), 0.22);
+  color: var(--panel-text);
 }
 
 /* 封面：只管高度，宽度按原图比例自适应，两侧留白并居中
@@ -383,7 +347,7 @@ export default defineComponent({
 .lists .cover-fallback {
   width: 40px;
   height: 40px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--panel-text-dim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -406,7 +370,7 @@ export default defineComponent({
 .lists .title em {
   font-style: normal;
   font-weight: 600;
-  color: #d03050;
+  color: var(--accent-danger);
 }
 .lists .sub {
   display: flex;
@@ -441,18 +405,18 @@ export default defineComponent({
 }
 
 .lists li:nth-child(2n) .index {
-  background: rgba(255, 255, 255, 0.3);
-  border-color: rgba(255, 255, 255, 0.5);
-  color: black;
+  background: rgba(var(--text-rgb), 0.24);
+  border-color: rgba(var(--text-rgb), 0.32);
+  color: var(--panel-text);
 }
 
 .lists li.active {
-  background: rgba(102, 120, 232, 0.32);
+  background: var(--panel-active);
 }
 .lists li.active .index {
-  background: rgba(232, 17, 35, 0.5);
-  border-color: rgba(232, 17, 35, 0.6);
-  color: white;
+  background: var(--panel-active);
+  border-color: rgba(var(--text-rgb), 0.32);
+  color: var(--panel-text);
 }
 .lists li.active .title {
   font-weight: 600;

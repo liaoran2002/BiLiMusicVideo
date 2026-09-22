@@ -31,7 +31,7 @@ export default defineConfig({
       rollupOptions: {
         input: resolve(__dirname, 'electron/main/index.ts'),
         // 原生模块不能被打包，必须在运行时 require
-        external: ['electron-as-wallpaper', 'koffi'],
+        external: ['electron-as-wallpaper'],
       },
     },
   },

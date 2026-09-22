@@ -18,7 +18,6 @@ import type {
   AppSetting,
   DragOffset,
   IpcChannelMap,
-  Playlist,
   RemoveListener,
   TrayState,
   UserInfo,
@@ -46,7 +45,6 @@ const api = {
 
   // #region 登录
   startLogin: (): Promise<void> => rendererInvoke('auth:startLogin'),
-  reLogin: (): Promise<void> => rendererInvoke('auth:reLogin'),
   setLoggedIn: (loggedIn: boolean): Promise<void> =>
     rendererInvoke('auth:setLoggedIn', { loggedIn }),
   executeLogout: (): Promise<void> => rendererInvoke('auth:executeLogout'),
@@ -85,8 +83,6 @@ const api = {
   // #endregion
 
   // #region 歌单 / 缓存
-  getPlaylist: (): Promise<Playlist | null> => rendererInvoke('playlist:get'),
-  savePlaylist: (data: Playlist): Promise<boolean> => rendererInvoke('playlist:save', data),
   /** 歌单集合（多歌单） */
   getPlaylists: (): Promise<PlaylistStoreData> => rendererInvoke('playlists:get'),
   savePlaylists: (params: PlaylistSaveParams): Promise<PlaylistStoreData> =>
@@ -94,8 +90,6 @@ const api = {
   syncPlaylists: (ids: string[]): Promise<SyncResult[]> =>
     rendererInvoke('playlists:sync', { ids }),
   clearCache: (): Promise<boolean> => rendererInvoke('cache:clearAll'),
-  clearSingleCache: (keyword: string): Promise<boolean> =>
-    rendererInvoke('cache:clearSingle', { keyword }),
   getCacheStats: (): Promise<CacheStats> => rendererInvoke('cache:getStats'),
   pruneCache: (): Promise<CacheStats> => rendererInvoke('cache:prune'),
   // #endregion
@@ -115,6 +109,10 @@ const api = {
   onMaximized: (cb: (val: boolean) => void): RemoveListener => rendererOn('window:maximized', cb),
   onFullscreen: (cb: (val: boolean) => void): RemoveListener =>
     rendererOn('window:fullscreen', cb),
+  // #endregion
+
+  // #region 应用
+  openExternal: (url: string): Promise<boolean> => rendererInvoke('app:openExternal', { url }),
   // #endregion
 
   // #region 壁纸

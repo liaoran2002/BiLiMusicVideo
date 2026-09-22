@@ -10,7 +10,7 @@
  * 这两类在本项目用不到，故未移植；遇到时会给出明确报错而不是静默失败。
  */
 import type { MusicSource, ParsedSong, PlaylistDetail } from '@common/types/musicSdk'
-import { musicFetch, musicFetchJson } from '../http'
+import { musicFetchJson } from '../http'
 import { decodeName, formatPlayTime, formatSingerName, toParsedSong, withRetry } from '../utils'
 
 const SOURCE: MusicSource = 'kw'
@@ -52,7 +52,7 @@ const parseDigestId = (input: string): { digest: string; id: string } | null => 
 /**
  * 歌单链接 / ID -> 纯数字歌单 id
  */
-export const getListId = (rawInput: string): string => {
+const getListId = (rawInput: string): string => {
   const input = rawInput.trim()
 
   // 波点分享链接：本项目未移植，明确报错
@@ -149,14 +149,4 @@ export const getListDetail = async (
     2,
     '酷我歌单解析',
   )
-}
-
-/** 保持与其它源一致的可用性（供调试） */
-export const canFetch = async (url: string): Promise<boolean> => {
-  try {
-    const res = await musicFetch(url, { timeout: 8000 })
-    return res.statusCode < 400
-  } catch {
-    return false
-  }
 }

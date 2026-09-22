@@ -7,6 +7,7 @@
 import * as biliApi from './biliApi'
 import * as cacheManager from './utils/cache'
 import { registerSettingHandlers } from './ipc/setting'
+import { registerAppHandlers } from './ipc/app'
 import { registerWindowHandlers } from './ipc/window'
 import { registerAuthHandlers } from './ipc/auth'
 import { registerApiHandlers } from './ipc/biliApiHandlers'
@@ -48,6 +49,9 @@ export interface IpcContext {
 export const registerIpcHandlers = (context: IpcContext): void => {
   // 配置相关（本次改造新增的核心部分）
   registerSettingHandlers()
+
+  // 应用级杂项（打开外部链接）
+  registerAppHandlers()
 
   // 窗口控制
   registerWindowHandlers(context)
