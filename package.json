@@ -1,8 +1,8 @@
 {
   "name": "BiLiMusicVideo-desktop",
-  "version": "1.5.0",
+  "version": "1.0",
   "author": "liaoran2002",
-  "description": "BLMV：把音乐歌单变成 B 站视频播放列表的桌面播放器。支持网易云 / QQ音乐 / 酷我歌单导入、1080P60 与 Hi-Res 播放、自动续播、桌面壁纸模式。",
+  "description": "BLMV：把音乐歌单变成B站MV视频播放列表的桌面播放器。",
   "main": "./out/main/index.js",
   "private": true,
   "scripts": {

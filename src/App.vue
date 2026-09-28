@@ -13,7 +13,7 @@
       <!-- 右侧：壁纸 / 头像 / 设置 / 窗口按钮 -->
       <div class="titlebar-right">
         <div class="titlebar-btn" @click="toggleWallpaper">
-          {{ wallpaperEnabled ? '应用程序' : '桌面壁纸' }}
+          {{ wallpaperEnabled ? '窗口模式' : '壁纸模式' }}
         </div>
         <div class="user-info" @click="handleLogoutConfirm">
           <img
@@ -192,6 +192,13 @@ import type { DashStreamsPayload, QualityOptionsPayload } from '@common/types/ip
 const START_BUFFER_S = 5;
 /** 播放中需要前方至少有多少秒余量才认为不会卡 */
 const LEAD_S = 3;
+/**
+ * 距片尾多少秒开始预热下一首
+ *
+ * 预热只跑「搜索 + 播放地址解析」两个接口（主进程有缓存），一般 1~3 秒就完；
+ * 留 15 秒足够，也不至于太早 —— 太早拿到的播放地址可能已经过期。
+ */
+const PREFETCH_AHEAD_S = 15;
 import type {
   AppData,
   BiliVideo,
@@ -334,6 +341,8 @@ export default defineComponent({
       isMaximized: false,
       isFullscreen: false,
       wallpaperEnabled: false,
+      /** 自绘托盘菜单是否正开着（开着时吞掉窗口内点击） */
+      trayMenuOpen: false,
       isDragging: false,
       dragStarted: false,
       dragReady: false,
@@ -359,6 +368,7 @@ export default defineComponent({
       removeTrayShowPlaylist: null,
       removeTrayShowLogoutConfirm: null,
       removeWallpaperState: null,
+      removeTrayMenuListener: null,
       lastNonZeroVolume: 0,
       /** 设置弹窗 */
       settingsVisible: false,
@@ -395,10 +405,28 @@ export default defineComponent({
       _lastPersistAt: 0,
       /** 上次同步 SMTC 进度的时间戳（节流用） */
       _lastMediaPosAt: 0,
+      /** 上次发给任务栏的进度指纹（百分比 + 暂停态），避免每次 timeupdate 都发 IPC */
+      _lastTaskbarKey: '',
       /** 定时自动同步的定时器 */
       _syncTimer: null as ReturnType<typeof setInterval> | null,
       /** 定时器对应的「策略指纹」，用来避免被无关的配置广播反复重建 */
       _syncKey: '',
+      /** 片尾看门狗：每秒检查一次「缓冲到底但没触发 ended」 */
+      _endWatchTimer: null as ReturnType<typeof setInterval> | null,
+      /** 换源时延迟显示缓冲提示的定时器 */
+      _bufferOverlayTimer: null as ReturnType<typeof setTimeout> | null,
+      /** 预热槽位：上一首 / 下一首各一个 */
+      _warm: { next: null, prev: null } as AppData['_warm'],
+      _warming: { next: false, prev: false },
+      _warmEl: { next: null, prev: null } as AppData['_warmEl'],
+      _warmSession: { next: null, prev: null } as AppData['_warmSession'],
+      _warmTimer: { next: null, prev: null } as AppData['_warmTimer'],
+      /** 播放位置最后一次前进的时间戳 */
+      _lastProgressAt: 0,
+      /** 最后一次记录到的播放位置（判断有没有前进） */
+      _progressPos: 0,
+      /** 本次源已经按「播完」处理过，避免看门狗重复触发 */
+      _endStallHandled: false,
     };
   },
   methods: {
@@ -542,6 +570,8 @@ export default defineComponent({
       // 曲目变了，随机播放的下标表必须跟着重建：
       // 否则同步后曲目变少，随机列表里还留着越界下标，「下一首」会拿到 null 静默不动
       this.resetRandomList();
+      // 预热槽位按下标算，曲目一变就全部作废
+      this.clearAllWarm();
       if (this.songs.length === 0) return;
       if (keepIndex >= this.songs.length) {
         this.currentIndex = 0;
@@ -567,13 +597,13 @@ export default defineComponent({
       if (!songName) return false;
 
       const resumeTime = this.settingStore.setting['player.resumeTime'] || 0;
-      const useTime = this.settingStore.setting['player.resumePlaybackTime'];
 
       try {
-        if (await this.restoreSongVideo(songName, useTime ? resumeTime : 0)) {
+        // 「记住播放进度」一个开关管到底：歌 + 进度一起回来
+        if (await this.restoreSongVideo(songName, resumeTime)) {
           this.$message.success(
             `已续播《${this.listName}》第 ${index + 1} 首` +
-              (useTime && resumeTime > 3 ? `（${this.formatTime(resumeTime)}）` : ''),
+              (resumeTime > 3 ? `（${this.formatTime(resumeTime)}）` : ''),
           );
           return true;
         }
@@ -728,9 +758,7 @@ export default defineComponent({
         // 也要把上次的秒数带上，否则换歌单/首启场景会丢掉进度
         const cfg = this.settingStore.setting;
         const resumeTime =
-          cfg['player.resumeOnStart'] && cfg['player.resumePlaybackTime']
-            ? Number(cfg['player.resumeTime']) || 0
-            : 0;
+          cfg['player.resumeOnStart'] ? Number(cfg['player.resumeTime']) || 0 : 0;
         void this.playCurrent(resumeTime > 3 ? resumeTime : 0);
         return;
       }
@@ -843,6 +871,14 @@ export default defineComponent({
       this.paused = true;
       // 失败计数属于上一首，留着会让新歌的第一次错误被当成第二次（直接跳歌）
       this._videoErrorCount = 0;
+      // 任务栏进度也跟着清掉（没有在播的东西了）
+      this.updateTaskbarProgress();
+      // 片尾看门狗的状态也属于上一首：换源时重新计时
+      this._endStallHandled = false;
+      this._progressPos = 0;
+      this._lastProgressAt = Date.now();
+      // 预热结果（含隐藏的预热流）属于上一首的上下文，一起清掉
+      this.clearAllWarm();
       this.syncTrayState();
     },
     playCurrent(seekTo = 0): void {
@@ -944,17 +980,244 @@ export default defineComponent({
       this.buffering = true;
       this.syncBufferState();
       this.startBufferTicker();
+      /**
+       * 真卡了就先松开预热的流。
+       *
+       * 预热是「为了更顺」，绝不能反过来把当前播放挤卡 ——
+       * 一旦出现 waiting/stalled，立刻停掉两个方向的预热下载。
+       */
+      this.stopWarmMedia('next');
+      this.stopWarmMedia('prev');
     },
     onVideoPlaying(): void {
       this.buffering = false;
       this.bufferPercent = 100;
       this.stopBufferTicker();
+      // 已经出画：撤掉还没到点的换源提示
+      this.clearBufferOverlayTimer();
     },
     /** 已经缓冲到第几秒（取最后一段的末尾；没数据返回 0） */
     lastBufferedEnd(): number {
       const el = this.videoEl();
       if (!el || !el.buffered.length) return 0;
       return el.buffered.end(el.buffered.length - 1);
+    },
+    /**
+     * 片尾看门狗
+     *
+     * dash（MSE）偶尔会「缓冲已经到底、画面也播到最后一秒，但 `ended` 就是不触发」，
+     * 于是自动下一首永远不会发生，界面上只留一个不动的缓冲圈 —— 用户看到的就是
+     * 「播到还剩一秒卡住，弹个 98% 不动」。
+     *
+     * 判定条件卡得很死，避免把「尾巴还在下载」误判成播完：
+     *  - 已经进入最后 2 秒，且**缓冲末尾真的到了片尾**（尾巴没下完就不会满足）
+     *  - 没有暂停 / 没有在 seek（否则不动是正常的）
+     *  - 位置连续 3 秒没有前进
+     * 命中就按「播完了」处理（单曲循环重播，其余模式下一首）。
+     */
+    checkEndOfStream(): void {
+      const v = this.videoEl();
+      if (!v || this._endStallHandled) return;
+      const d = v.duration;
+      if (!Number.isFinite(d) || d <= 0) return;
+      if (v.paused || v.seeking) return;
+      if (v.currentTime < d - 2) return;
+      /**
+       * 缓冲末尾的判定要留足余量。
+       *
+       * 实测的卡死现场：`155.1 / 156.0`、`readyState = 2`（有当前帧、没有后续数据），
+       * 缓冲末尾就停在 155.1 —— 比总时长差 0.9 秒。原来要求 `>= duration - 0.5`，
+       * 正好差一点点不满足，于是**看着它卡在那里什么都不做**（这就是用户报的那个 bug）。
+       * 放宽到 2.5 秒：片尾这几秒本来就短，差这么多只可能是「拿不到剩下的了」。
+       */
+      if (this.lastBufferedEnd() < d - 2.5) return;
+      /**
+       * 等多久算真卡住：`readyState >= 3` 说明还有后手数据，等 3 秒；
+       * `readyState <= 2`（等着数据但没来）多给一点时间，避免尾巴下载慢时误判成播完。
+       */
+      const wait = v.readyState >= 3 ? 3000 : 5000;
+      if (Date.now() - this._lastProgressAt < wait) return;
+      this._endStallHandled = true;
+      console.warn('[video] 片尾卡住（缓冲到底但没触发 ended），按播完处理');
+      this.videoEnded();
+    },
+    startEndWatch(): void {
+      if (this._endWatchTimer) return;
+      this._endWatchTimer = setInterval(() => {
+        this.checkEndOfStream();
+        this.maybeWarm();
+      }, 1000);
+    },
+    /**
+     * 预热「上一首 / 下一首」
+     *
+     * 目的：**手动切歌也不要停滞感**。切歌那次卡顿来自两段：
+     *   1. 搜索 + 播放地址解析（缓存未命中时 1~3 秒网络往返）
+     *   2. MSE 起播（要拉到第一个分片才能出画）
+     * 所以两个方向都提前做：
+     *   - 歌一开始播就把两个方向的**接口结果**备好（很便宜，几 KB）；
+     *   - 接口就绪后把它们的**开头几秒真的拉起来**（隐藏的 <video>，静音），
+     *     这样切过去时同源媒体缓存里已有数据，出画几乎没有等待。
+     *
+     * 唯一要克制的是流量：预热的媒体流只拉 2.5 秒就停，而且**自己这边缓冲充足才做**
+     * （`bufferSeconds >= 5`），网络紧张时优先保当前播放。
+     */
+    maybeWarm(): void {
+      const v = this.videoEl();
+      if (!v) return;
+      const d = Number.isFinite(v.duration) ? v.duration : 0;
+      if (v.currentTime > 2) void this.warmApi('next');
+      // 再往后一点才做上一首，避免刚开播就两个请求一起打出去
+      if (v.currentTime > 6) void this.warmApi('prev');
+      // 接口备好了就把开头拉起来（近片尾时两个方向都要保证是热的）
+      const nearEnd = d > 0 && d - v.currentTime <= PREFETCH_AHEAD_S;
+      if (this.bufferSeconds >= 5 || nearEnd) {
+        if (this._warm.next) this.warmMedia('next');
+        if (this._warm.prev) this.warmMedia('prev');
+      }
+    },
+    /** 预热用「下一首 / 上一首」下标：规则与 next()/prev() 完全一致 */
+    indexForDir(dir: 'next' | 'prev'): number {
+      const len = this.songs.length;
+      if (len === 0) return -1;
+      if (this.currentMode === this.MODE.random) {
+        if (this.randomList.length === 0) this.resetRandomList();
+        const pos = this.randomList.indexOf(this.currentIndex);
+        if (pos === -1) return -1;
+        return dir === 'next'
+          ? this.randomList[(pos + 1) % this.randomList.length]
+          : this.randomList[(pos - 1 + this.randomList.length) % this.randomList.length];
+      }
+      return dir === 'next' ? (this.currentIndex + 1) % len : (this.currentIndex - 1 + len) % len;
+    },
+    /** 搜索 + 解析某个方向的下一首（结果放进槽位，供切歌时直接命中缓存） */
+    async warmApi(dir: 'next' | 'prev'): Promise<void> {
+      if (this._warming[dir]) return;
+      const idx = this.indexForDir(dir);
+      if (idx < 0) return;
+      const songName = this.getSongName(idx);
+      if (!songName || songName === this.songName) return;
+      if (this._warm[dir]?.song === songName) return; // 已经是热的
+      this._warming[dir] = true;
+      try {
+        const res = await electronApi.searchSong(songName);
+        const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
+        const list = this.sortSearchedVideos(videos, songName);
+        // 与 changeSong 的挑选规则一致，保证预热的就是待会儿真正要播的那个
+        const bvid =
+          (res.data as { selectedBvid?: string } | null)?.selectedBvid || list[0]?.bvid;
+        if (!bvid) return;
+        const url = await electronApi.resolveVideoUrl(
+          bvid,
+          songName,
+          false,
+          this._dashDisabled,
+        );
+        this._warm[dir] = {
+          song: songName,
+          bvid,
+          videoUrl: url.videoUrl ?? null,
+          dash: url.dash ?? null,
+        };
+        console.log(`[prefetch] 已备好${dir === 'next' ? '下一首' : '上一首'}：${songName}`);
+      } catch (err) {
+        // 预热失败完全不影响正常切歌（该联网还是联网），静默记一笔
+        console.warn(`[prefetch] 预热${dir}失败（忽略）:`, err);
+      } finally {
+        this._warming[dir] = false;
+      }
+    },
+    /**
+     * 把某个方向的开头几秒真的拉起来
+     *
+     * 用隐藏的静音 `<video>` + 同一个 dash 会话实现：这样**连接（DNS/TLS/HTTP2）是热的**，
+     * 能进 HTTP 缓存的分片也已经在本地，切过去时不用从零开始拉。
+     *
+     * 刻意**不调用 `play()`**：
+     *  - 播放会占用系统媒体控件（SMTC 面板可能被这个隐藏元素顶掉）；
+     *  - MSE 的分片是 JS 自己灌进去的，`start()` 本身就会拉数据，不需要真的播。
+     * 拉 2 秒就停，元素留着复用。
+     */
+    warmMedia(dir: 'next' | 'prev'): void {
+      const info = this._warm[dir];
+      if (!info || this._warmSession[dir] || this._warmTimer[dir]) return;
+      const nearEnd = this.duration > 0 && this.duration - this.currentTime <= PREFETCH_AHEAD_S;
+      // 自己这边都快不够播了就先不抢带宽（近片尾时例外：马上要切了）
+      if (this.bufferSeconds < 5 && !nearEnd) return;
+      const el = this.warmElement(dir);
+      if (!el) return;
+      try {
+        if (info.dash && DashSession.isSupported(info.dash)) {
+          const session = new DashSession(el);
+          this._warmSession[dir] = session;
+          session.start(info.dash).catch(() => this.stopWarmMedia(dir));
+        } else if (info.videoUrl) {
+          el.src = info.videoUrl;
+        } else {
+          return;
+        }
+      } catch (err) {
+        console.warn(`[prefetch] 预热媒体${dir}失败（忽略）:`, err);
+        this.stopWarmMedia(dir);
+        return;
+      }
+      // 只要开头那一小段，别把整条片子下下来
+      this._warmTimer[dir] = setTimeout(() => this.stopWarmMedia(dir), 2000);
+    },
+    /** 取（或创建）预热用的隐藏元素：移出可视区、静音，绝不参与界面 */
+    warmElement(dir: 'next' | 'prev'): VideoElement | null {
+      if (this._warmEl[dir]) return this._warmEl[dir];
+      const el = document.createElement('video');
+      el.muted = true;
+      el.volume = 0;
+      el.preload = 'auto';
+      el.setAttribute('playsinline', '');
+      el.style.cssText =
+        'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+      document.body.appendChild(el);
+      this._warmEl[dir] = el as unknown as VideoElement;
+      return this._warmEl[dir];
+    },
+    /** 停掉某个方向的预热播放（元素留着下次复用） */
+    stopWarmMedia(dir: 'next' | 'prev'): void {
+      if (this._warmTimer[dir]) {
+        clearTimeout(this._warmTimer[dir]);
+        this._warmTimer[dir] = null;
+      }
+      const session = this._warmSession[dir];
+      if (session) {
+        this._warmSession[dir] = null;
+        try {
+          session.stop();
+        } catch {
+          /* 忽略 */
+        }
+      }
+      const el = this._warmEl[dir];
+      if (el) {
+        try {
+          el.pause();
+          el.removeAttribute('src');
+          el.load();
+        } catch {
+          /* 忽略 */
+        }
+      }
+    },
+    /** 丢掉某个方向的预热结果（切进那首歌了 / 歌单变了） */
+    clearWarm(dir: 'next' | 'prev'): void {
+      this.stopWarmMedia(dir);
+      this._warm[dir] = null;
+    },
+    /** 两个方向全部作废（换歌单 / 清空播放） */
+    clearAllWarm(): void {
+      this.clearWarm('next');
+      this.clearWarm('prev');
+    },
+    /** 已经切进预热过的那首歌：对应槽位作废 */
+    dropWarmIfCurrent(): void {
+      if (this._warm.next?.song === this.songName) this.clearWarm('next');
+      if (this._warm.prev?.song === this.songName) this.clearWarm('prev');
     },
     /**
      * 刷新缓冲百分比
@@ -971,13 +1234,30 @@ export default defineComponent({
       if (!el) return;
       const end = this.lastBufferedEnd();
       this.bufferSeconds = Math.max(0, end - el.currentTime);
-      // 起播时目标是缓冲出 START_BUFFER_S 秒；播放中目标是「播放点 + LEAD_S」
-      const need = Math.max(el.currentTime + LEAD_S, START_BUFFER_S);
-      const ratio = end <= 0 ? 0 : end / need;
+      const duration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
+      /**
+       * 分母不能超过片子总长。
+       *
+       * 原来分母是 `max(播放点 + 3, 5)`，越接近片尾这个数越大，而缓冲末尾最多只能到
+       * `duration`（播放器不可能缓冲到片子后面）—— 于是进度永远差一点点，
+       * 表现就是「播到还剩一秒，弹个 98% 的圈不动」。夹到 duration 之后，
+       * 片尾那几秒的百分比就是真实的「下载到哪了」。
+       */
+      const target = Math.max(el.currentTime + LEAD_S, START_BUFFER_S);
+      const need = duration > 0 ? Math.min(duration, target) : target;
+      const ratio = end <= 0 || need <= 0 ? 0 : Math.min(1, end / need);
       this.bufferPercent = Math.max(0, Math.min(99, Math.floor(ratio * 100)));
 
-      // 够播了就撤掉提示
-      if (el.readyState >= 3 && this.bufferSeconds >= 1) {
+      /**
+       * 够播了就撤掉提示。
+       *
+       * 正常播放中要求留 ≥1 秒余量；但**已经缓冲到片尾**时不存在「余量」这回事
+       * （最后那零点几秒就是全部了），所以这时只要解码器就绪、还剩一点数据就撤，
+       * 否则就会一直挂着一个 98% / 99% 的圈。
+       */
+      const atStreamEnd = duration > 0 && end >= duration - 0.5;
+      const enough = el.readyState >= 3 && this.bufferSeconds >= (atStreamEnd ? 0.05 : 1);
+      if (enough) {
         this.bufferPercent = 100;
         this.buffering = false;
         this.stopBufferTicker();
@@ -1063,6 +1343,12 @@ export default defineComponent({
           this.seekAfterLoadFor = '';
         }
         this._videoErrorCount = 0;
+        // 新的源开始了：片尾看门狗的两个状态一起复位
+        this._endStallHandled = false;
+        this._progressPos = 0;
+        this._lastProgressAt = Date.now();
+        // 如果这次切进来的正是预热过的那首，对应槽位就作废了
+        this.dropWarmIfCurrent();
         void v.play().catch(() => {});
         this.paused = false;
         // dash（MSE）成功出画：清掉失败计数
@@ -1091,6 +1377,11 @@ export default defineComponent({
       if (!v) return;
       this.currentTime = v.currentTime;
       this.duration = v.duration;
+      // 记录「播放位置最后一次前进」的时间，片尾看门狗靠它判断是不是真的卡住了
+      if (v.currentTime - this._progressPos > 0.05) {
+        this._progressPos = v.currentTime;
+        this._lastProgressAt = Date.now();
+      }
       // 少数源在 loadeddata 时尺寸还没就绪，这里补一次（拿到就不再重复算）
       if (!this.videoQuality) this.syncVideoQuality();
       // 节流记录播放进度，供下次续播
@@ -1484,11 +1775,18 @@ export default defineComponent({
       if (!el) return;
       this.stopDashSession();
 
-      // 换源就要重新缓冲：先把提示亮出来，别让用户以为卡死了
-      this.buffering = true;
+      /**
+       * 换源时**不要立刻**亮缓冲提示。
+       *
+       * 搜索 / 播放地址都有缓存时，切歌常常 200~400ms 就出画了，
+       * 提示亮一下再灭反而像闪屏（用户说的「切歌时的加载条」）。
+       * 所以延迟 500ms：真慢（重新联网解析、MSE 拉流慢）还是会显示，反馈不丢。
+       */
       this.bufferPercent = 0;
       this.bufferSeconds = 0;
-      this.startBufferTicker();
+      this.stopBufferTicker();
+      this.buffering = false;
+      this.scheduleBufferOverlay();
 
       const dash = this.dashSource;
       if (dash && DashSession.isSupported(dash)) {
@@ -1509,6 +1807,36 @@ export default defineComponent({
         console.warn('[video] 当前环境不支持该 dash 编码，改用 durl');
       }
       if (this.videoUrl) el.src = this.videoUrl;
+    },
+    /**
+     * 延迟显示换源缓冲提示
+     *
+     * 500ms 内已经能播（`readyState >= 3`）就完全不显示；
+     * 否则亮出来，用户知道是在拉流而不是卡死。
+     */
+    scheduleBufferOverlay(): void {
+      this.clearBufferOverlayTimer();
+      this._bufferOverlayTimer = setTimeout(() => {
+        this._bufferOverlayTimer = null;
+        const el = this.videoEl();
+        if (!el || el.readyState >= 3) return;
+        /**
+         * 已经缓冲出足够数据（≥1 秒）也别亮提示。
+         *
+         * 实测：预热过的切歌里有 200ms 左右「数据其实早就够了、只是解码器还没出画」的空窗，
+         * 这时亮一个 99% 的圈纯粹是干扰 —— 够播了就该直接出画。
+         */
+        if (this.lastBufferedEnd() - el.currentTime >= 1) return;
+        this.buffering = true;
+        this.syncBufferState();
+        this.startBufferTicker();
+      }, 500);
+    },
+    clearBufferOverlayTimer(): void {
+      if (this._bufferOverlayTimer) {
+        clearTimeout(this._bufferOverlayTimer);
+        this._bufferOverlayTimer = null;
+      }
     },
     stopDashSession(): void {
       if (this._dashSession) {
@@ -1705,6 +2033,42 @@ export default defineComponent({
       if (now - this._lastMediaPosAt < 3000) return;
       this._lastMediaPosAt = now;
       this.updateMediaPosition();
+      this.updateTaskbarProgress();
+    },
+    /**
+     * 任务栏进度条（Windows 任务栏图标上的那条）
+     *
+     * 只在「百分比或暂停状态真的变了」时才发 IPC：`timeupdate` 一秒好几次，
+     * 每次都发会把主进程喊爆。
+     */
+    updateTaskbarProgress(): void {
+      const total = this.duration || 0;
+      const progress = total > 0 ? (this.currentTime || 0) / total : -1;
+      // 设置里关掉、或者没有在播 -> 清掉进度条
+      const enabled = this.settingStore.setting['common.taskbarProgress'];
+      const value = !enabled || (!this.videoUrl && !this.dashSource) ? -1 : progress;
+      const key = value < 0 ? 'none' : `${Math.round(value * 200)}|${this.paused}`;
+      if (key === this._lastTaskbarKey) return;
+      this._lastTaskbarKey = key;
+      void electronApi.setProgress(value, this.paused);
+    },
+    /**
+     * 声音输出设备变化时暂停播放（设置项 `player.pauseOnDeviceChange`）
+     *
+     * 插拔耳机、切换默认输出设备时，正在播的音频有可能会跑到另一个设备上，
+     * 所以先暂停，等用户自己决定继续。（`devicechange` 不区分输入/输出设备，
+     * 这是渲染进程能拿到的唯一信号。）
+     */
+    onAudioDeviceChange(): void {
+      if (!this.settingStore.setting['player.pauseOnDeviceChange']) return;
+      if (this.paused) return;
+      this.playControl();
+      this.$message.info('检测到声音输出设备变化，已暂停播放');
+    },
+    setupAudioDeviceWatch(): void {
+      const md = navigator.mediaDevices;
+      if (!md || typeof md.addEventListener !== 'function') return;
+      md.addEventListener('devicechange', this.onAudioDeviceChange);
     },
     /**
      * 关闭窗口前记录播放信息
@@ -1780,11 +2144,30 @@ export default defineComponent({
           : (this.currentIndex + 1) % this.songs.length;
       this.changeSong(index);
     },
+    /**
+     * 自绘托盘菜单打开期间吞掉窗口内的鼠标点击（捕获阶段）
+     *
+     * 壁纸模式的鼠标转发会把「点菜单项」这一下同时合成到壁纸窗口上，
+     * 不拦的话可能顺手把控制栏的按钮也点了一次。
+     */
+    onTrayMenuGuard(e: MouseEvent): void {
+      if (!this.trayMenuOpen) return;
+      e.stopPropagation();
+      e.preventDefault();
+    },
     syncTrayState(): void {
+      // 托盘显示的是「歌曲名 - 歌手名」，不是视频标题（视频标题太长了）
+      const song = this.getSong(this.currentIndex);
+      const title = song
+        ? song.singer
+          ? `${song.name} - ${song.singer}`
+          : song.name
+        : this.songName || '';
       electronApi.trayUpdateState({
         paused: this.paused,
         // 托盘契约用字符串枚举的循环模式（与持久化的 player.loopMode 一致）
         loopMode: PLAY_LOOP_MODES[this.currentMode] || 'listLoop',
+        title,
       });
     },
     async initWallpaperState(): Promise<void> {
@@ -1873,6 +2256,8 @@ export default defineComponent({
           this._syncKey = syncKey;
           this.setupSyncTimer();
         }
+        // 任务栏进度开关可能刚被关掉：立刻把进度条清掉（不然要等下一次 3 秒节流）
+        this.updateTaskbarProgress();
       },
       deep: true,
     },
@@ -1919,6 +2304,22 @@ export default defineComponent({
     this.removeFullscreenListener = electronApi.onFullscreen((val) => {
       this.isFullscreen = val;
     });
+    // 声音输出设备变化时暂停（插拔耳机 / 切默认设备）
+    this.setupAudioDeviceWatch();
+    // 片尾看门狗：常驻一个 1 秒的心跳（内部条件很严，平时几乎不做任何事）
+    this.startEndWatch();
+    /**
+     * 自绘托盘菜单打开期间，把窗口内的点击吞掉。
+     *
+     * 原因：壁纸模式开着鼠标转发，用户点菜单项时壁纸窗口**同时**会收到一次同坐标的
+     * 合成点击，可能误触控制栏。用捕获阶段拦下来，菜单一关就恢复。
+     */
+    this.removeTrayMenuListener = electronApi.onTrayMenuVisibility((visible) => {
+      this.trayMenuOpen = visible;
+    });
+    document.addEventListener('mousedown', this.onTrayMenuGuard, true);
+    document.addEventListener('mouseup', this.onTrayMenuGuard, true);
+    document.addEventListener('click', this.onTrayMenuGuard, true);
     document.addEventListener('keydown', this.handleKeydown);
     document.addEventListener('mousemove', this.onDocMouseMove);
     document.addEventListener('mouseup', this.onDocMouseUp);
@@ -1928,6 +2329,29 @@ export default defineComponent({
   beforeUnmount() {
     this.stopDashSession();
     this.stopBufferTicker();
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this.onAudioDeviceChange);
+    // 自绘托盘菜单的守卫与其他监听一起摘掉
+    document.removeEventListener('mousedown', this.onTrayMenuGuard, true);
+    document.removeEventListener('mouseup', this.onTrayMenuGuard, true);
+    document.removeEventListener('click', this.onTrayMenuGuard, true);
+    if (this.removeTrayMenuListener) this.removeTrayMenuListener();
+    // 预热的隐藏流 / 元素也要收掉
+    this.clearAllWarm();
+    for (const dir of ['next', 'prev'] as const) {
+      const el = this._warmEl[dir];
+      if (el) {
+        try {
+          (el as unknown as HTMLVideoElement).remove();
+        } catch {
+          /* 忽略 */
+        }
+        this._warmEl[dir] = null;
+      }
+    }
+    if (this._endWatchTimer) {
+      clearInterval(this._endWatchTimer);
+      this._endWatchTimer = null;
+    }
     if (this.removeLoginListener) this.removeLoginListener();
     if (this.removeLogoutListener) this.removeLogoutListener();
     if (this.removeTrayPlayControl) this.removeTrayPlayControl();

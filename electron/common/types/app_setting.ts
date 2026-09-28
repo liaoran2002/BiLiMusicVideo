@@ -15,6 +15,10 @@ export interface AppSetting {
   // #region common
   /** 是否以桌面壁纸模式启动（等价于命令行 --wallpaper-mode） */
   'common.wallpaperMode': boolean
+  /** 点关闭按钮时不退出，最小化到系统托盘 */
+  'common.closeToTray': boolean
+  /** 在任务栏图标上显示当前视频播放进度 */
+  'common.taskbarProgress': boolean
   /** 玻璃底色（hex）：控制栏、弹窗、歌单下拉的那层底 */
   'common.themeColor': string
   /** 浮层上的文字颜色（hex） */
@@ -55,12 +59,12 @@ export interface AppSetting {
   'player.loopMode': (typeof import('../constants').PLAY_LOOP_MODES)[number]
   /** 上次播放到第几首 */
   'player.playIndex': number
-  /** 启动时自动续播上次的歌单 / 歌曲 / 进度 */
+  /** 记住播放进度：启动时回到上次的歌单 / 歌曲 / 播放位置 */
   'player.resumeOnStart': boolean
-  /** 续播时是否连播放进度（秒）一起恢复；关闭则从该曲开头播放 */
-  'player.resumePlaybackTime': boolean
   /** 上次播放到的秒数（用于续播） */
   'player.resumeTime': number
+  /** 声音输出设备变化（插拔耳机 / 切默认设备）时暂停播放 */
+  'player.pauseOnDeviceChange': boolean
   /** 默认视频清晰度（B 站 qn 档位代码，如 116 = 1080P 60帧） */
   'player.videoQuality': number
   /** 默认音质（dash 音频流 id，如 30280 = 192K） */

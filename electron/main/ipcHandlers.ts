@@ -16,6 +16,7 @@ import { registerCacheHandlers } from './ipc/cache'
 import { registerMusicHandlers } from './ipc/music'
 import { registerWallpaperHandlers } from './ipc/wallpaper'
 import { registerTrayHandlers } from './ipc/tray'
+import type { TrayMenuAction, TrayMenuState, TrayState } from '@common/types/ipc'
 
 export interface IpcContext {
   /** 取主窗口（可能尚未创建或被销毁） */
@@ -38,8 +39,18 @@ export interface IpcContext {
   getScreenWorkArea: () => Electron.Rectangle | null
   /** 设置登录状态（影响托盘菜单） */
   setLoggedIn: (loggedIn: boolean) => void
-  /** 更新托盘播放状态 */
-  updateTrayState: (state: { paused?: boolean; loopMode?: string }) => void
+  /** 更新托盘播放状态（用共享的 TrayState，别再写一份内联类型） */
+  updateTrayState: (state: TrayState) => void
+  /** 自绘托盘菜单：当前状态 */
+  getTrayMenuState: () => TrayMenuState
+  /** 自绘托盘菜单：执行动作（内部会先收起菜单） */
+  runTrayMenuAction: (action: TrayMenuAction) => void
+  /** 自绘托盘菜单：页面回报高度后定位并显示 */
+  sizeTrayMenu: (height: number) => void
+  /** 自绘托盘菜单：收起 */
+  hideTrayMenu: () => void
+  /** 任务栏播放进度（0~1；<0 表示清除） */
+  setProgress: (progress: number, paused: boolean) => void
   /** 执行退出登录（清 cookie） */
   executeLogout: () => Promise<void>
   /** 应用退出 */

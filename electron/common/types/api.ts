@@ -17,6 +17,8 @@ import type { AppSetting } from './app_setting'
 import type {
   DragOffset,
   RemoveListener,
+  TrayMenuAction,
+  TrayMenuState,
   TrayState,
   UserInfo,
 } from './ipc'
@@ -53,6 +55,19 @@ export interface RendererAPI {
   onTrayToggleMode: (cb: () => void) => RemoveListener
   onTrayShowPlaylist: (cb: () => void) => RemoveListener
   onTrayShowLogoutConfirm: (cb: () => void) => RemoveListener
+  // #endregion
+
+  // #region 自绘托盘菜单（菜单窗口用它渲染与回报尺寸；主窗口用 visibility 吞掉合成点击）
+  trayMenuGetState: () => Promise<TrayMenuState>
+  trayMenuAction: (action: TrayMenuAction) => Promise<void>
+  trayMenuReady: (height: number) => Promise<void>
+  trayMenuClose: () => Promise<void>
+  onTrayMenuState: (cb: (state: TrayMenuState) => void) => RemoveListener
+  onTrayMenuVisibility: (cb: (visible: boolean) => void) => RemoveListener
+  // #endregion
+
+  // #region 任务栏进度（0~1，<0 清除；paused 用「已暂停」样式）
+  setProgress: (progress: number, paused: boolean) => Promise<void>
   // #endregion
 
   // #region B 站接口

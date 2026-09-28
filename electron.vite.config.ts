@@ -64,7 +64,15 @@ export default defineConfig({
     build: {
       outDir: 'out/renderer',
       rollupOptions: {
-        input: resolve(__dirname, 'index.html'),
+        /**
+         * 两个页面：
+         *  - index.html     主界面
+         *  - tray-menu.html 自绘托盘菜单（独立置顶窗口用，见 src/trayMenu/main.ts）
+         */
+        input: {
+          index: resolve(__dirname, 'index.html'),
+          trayMenu: resolve(__dirname, 'tray-menu.html'),
+        },
       },
     },
   },

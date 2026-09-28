@@ -44,18 +44,19 @@
           </el-select>
         </div>
         <div class="st-row">
-          <div class="st-name">自动续播</div>
+          <div class="st-name">记住播放进度</div>
           <el-switch
             :model-value="setting['player.resumeOnStart']"
             @update:model-value="(v: string | number | boolean) => setBool('player.resumeOnStart', v)"
           />
         </div>
         <div class="st-row">
-          <div class="st-name">恢复播放进度</div>
+          <div class="st-name">声音输出设备变化时暂停</div>
           <el-switch
-            :model-value="setting['player.resumePlaybackTime']"
-            :disabled="!setting['player.resumeOnStart']"
-            @update:model-value="(v: string | number | boolean) => setBool('player.resumePlaybackTime', v)"
+            :model-value="setting['player.pauseOnDeviceChange']"
+            @update:model-value="
+              (v: string | number | boolean) => setBool('player.pauseOnDeviceChange', v)
+            "
           />
         </div>
       </div>
@@ -149,6 +150,22 @@
           <el-switch
             :model-value="setting['common.wallpaperMode']"
             @update:model-value="(v: string | number | boolean) => setBool('common.wallpaperMode', v)"
+          />
+        </div>
+        <div class="st-row">
+          <div class="st-name">关闭窗口时最小化到托盘</div>
+          <el-switch
+            :model-value="setting['common.closeToTray']"
+            @update:model-value="(v: string | number | boolean) => setBool('common.closeToTray', v)"
+          />
+        </div>
+        <div class="st-row">
+          <div class="st-name">任务栏显示播放进度</div>
+          <el-switch
+            :model-value="setting['common.taskbarProgress']"
+            @update:model-value="
+              (v: string | number | boolean) => setBool('common.taskbarProgress', v)
+            "
           />
         </div>
         <div class="st-row">
@@ -283,7 +300,12 @@ export default defineComponent({
      * 所以这里在方法里收窄成 boolean，避免模板里塞一堆断言。
      */
     setBool(
-      key: 'player.resumeOnStart' | 'player.resumePlaybackTime' | 'common.wallpaperMode',
+      key:
+        | 'player.resumeOnStart'
+        | 'player.pauseOnDeviceChange'
+        | 'common.wallpaperMode'
+        | 'common.closeToTray'
+        | 'common.taskbarProgress',
       v: string | number | boolean,
     ): void {
       this.set(key, Boolean(v));

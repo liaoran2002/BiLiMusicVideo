@@ -160,6 +160,20 @@ export interface IpcChannelMap {
   'wallpaper:toggle': { params: void; result: boolean }
   'wallpaper:isEnabled': { params: void; result: boolean }
   'tray:updateState': { params: TrayState; result: void }
+  /** 自绘托盘菜单：取一次当前状态（播放 / 循环 / 登录 / 壁纸） */
+  'trayMenu:getState': { params: void; result: TrayMenuState }
+  /** 自绘托盘菜单：执行一个动作 */
+  'trayMenu:action': { params: TrayMenuAction; result: void }
+  /** 自绘托盘菜单：页面量好自己的高度后回报，主进程据此定位并显示 */
+  'trayMenu:ready': { params: { height: number }; result: void }
+  /** 自绘托盘菜单：收起 */
+  'trayMenu:close': { params: void; result: void }
+  /**
+   * 任务栏播放进度
+   *
+   * progress 0~1；小于 0 表示清除进度条。paused 为真时 Windows 会画成「已暂停」样式。
+   */
+  'window:setProgress': { params: { progress: number; paused: boolean }; result: void }
   // #endregion
 }
 
@@ -188,6 +202,16 @@ export interface IpcEventMap {
   'wallpaper:state': boolean
   'window:maximized': boolean
   'window:fullscreen': boolean
+  /**
+   * 自绘托盘菜单弹出状态
+   *
+   * 为什么要广播：壁纸模式开着鼠标转发，用户点菜单项时壁纸窗口**同时**会收到
+   * 一次同坐标的合成点击。菜单打开期间主窗口要靠这个标志把点击吞掉，
+   * 免得误触到控制栏。
+   */
+  'trayMenu:visibility': boolean
+  /** 主进程把最新状态推给托盘菜单窗口 */
+  'trayMenu:state': TrayMenuState
 }
 
 export type IpcEvent = keyof IpcEventMap
@@ -224,4 +248,39 @@ export interface TrayState {
   paused?: boolean
   /** 当前循环模式（字符串枚举，见 PLAY_LOOP_MODES） */
   loopMode?: string
+  /** 当前在播什么（视频标题优先），壁纸模式下用来更新托盘悬浮提示 */
+  title?: string
+}
+
+/**
+ * 自绘托盘菜单能执行的动作
+ *
+ * 与原生菜单项一一对应（放弃原生菜单的原因见 main/index.ts 的 applyTrayMode）。
+ */
+export type TrayMenuAction =
+  | 'playControl'
+  | 'prev'
+  | 'next'
+  | 'toggleMode'
+  | 'showPlaylist'
+  | 'toggleWallpaper'
+  /** 窗口被收到托盘里时用它把窗口叫回来（菜单里那一项会变成「恢复窗口」） */
+  | 'restoreWindow'
+  | 'login'
+  | 'logout'
+  | 'quit'
+
+/** 自绘托盘菜单渲染时要的状态 */
+export interface TrayMenuState {
+  paused: boolean
+  /** 当前循环模式下标（与 PLAY_LOOP_MODES 对应） */
+  loopModeIndex: number
+  /** 当前循环模式的展示名 */
+  loopModeName: string
+  isLoggedIn: boolean
+  wallpaperEnabled: boolean
+  /** 主窗口是不是被藏起来了（关闭到托盘）——菜单那一项要显示「恢复窗口」 */
+  windowHidden: boolean
+  /** 当前在播什么（`歌曲名 - 歌手名`）；空表示没在播 */
+  title: string
 }

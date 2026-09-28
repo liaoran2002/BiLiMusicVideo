@@ -15,7 +15,6 @@ import {
   session,
   screen,
   Tray,
-  Menu,
   nativeImage,
 } from 'electron'
 import path from 'node:path'
@@ -32,7 +31,7 @@ import {
 import * as biliApi from './biliApi'
 import { initPlaylists, flushPlaylists } from './utils/playlist'
 import { PLAY_LOOP_MODES } from '@common/constants'
-import type { IpcEvent, IpcEventPayload } from '@common/types/ipc'
+import type { IpcEvent, IpcEventPayload, TrayMenuAction, TrayMenuState } from '@common/types/ipc'
 
 // electron-as-wallpaper 是原生模块，且只在 Windows 有意义，加载失败不应该影响主功能
 type AsWallpaper = typeof import('electron-as-wallpaper')
@@ -53,6 +52,12 @@ let isLoggedIn = false
 let isPaused = true
 let loopModeIndex = 0
 let wallpaperEnabled = false
+/** 是否正在退出应用（区分「点关闭按钮」与「真的要退出」） */
+let isQuitting = false
+/** 托盘悬浮提示里显示的「当前在播什么」（由渲染层同步） */
+let trayTitle = ''
+/** 上一次设过的 tooltip 文本，避免重复设置 */
+let lastTrayTip = ''
 /**
  * 是否处于「全屏」
  *
@@ -143,6 +148,14 @@ function createMainWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      /**
+       * 关掉后台节流
+       *
+       * 「关闭到托盘」之后窗口是隐藏的，Chromium 默认会把隐藏窗口的定时器压到约 1 次/分钟：
+       * 片尾看门狗、缓冲刷新、任务栏进度都会跟着失灵。音乐播放器缩到托盘还要继续正常播，
+       * 所以这里关掉节流。
+       */
+      backgroundThrottling: false,
     },
     show: false,
   })
@@ -187,8 +200,34 @@ function createMainWindow(): void {
     }
   })
 
+  /**
+   * 关闭按钮：按设置决定「真退出」还是「收到托盘」
+   *
+   * `isQuitting` 由 `before-quit` 置位 —— 否则「退出应用」菜单项 / 系统关机时
+   * 也会被这里拦下来，变成永远退不掉。
+   */
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return
+    if (!getSetting()['common.closeToTray']) return
+    event.preventDefault()
+    mainWindow?.hide()
+    // 藏起来了：托盘「恢复窗口」那一项要跟着变，tooltip 也说明一下
+    refreshTray()
+    console.log('[win] 已最小化到托盘（设置里关掉「关闭窗口时最小化到托盘」即可恢复直接退出）')
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
+    /**
+     * 主窗口关了就把托盘菜单窗口一起收掉。
+     *
+     * 否则 `window-all-closed` 永远不触发（那个自绘菜单窗口还「开着」，哪怕只是隐藏着），
+     * 表现就是「点 X 之后应用没退出，进程还在后台」。
+     */
+    if (trayMenuWindow && !trayMenuWindow.isDestroyed()) {
+      trayMenuWindow.destroy()
+      trayMenuWindow = null
+    }
   })
 
   mainWindow.on('maximize', () => {
@@ -412,11 +451,10 @@ async function applyWallpaperMode(enabled: boolean): Promise<void> {
       console.error('[wallpaper] attach 失败:', err)
     }
 
-    // 4) 壁纸模式下托盘没有意义，先移除
-    if (tray && !tray.isDestroyed()) {
-      tray.destroy()
-      tray = null
-    }
+    // 4) 托盘**不销毁**，只切到「壁纸模式用法」
+    //    原生弹出菜单在壁纸模式下用不了（原因见 applyTrayMode 的注释），
+    //    但托盘的 click 事件本身是好的，所以壁纸模式改成「单击 = 播放/暂停」。
+    applyTrayMode()
   } else {
     // 退出壁纸模式：先脱离壁纸层，再恢复窗口状态
     try {
@@ -436,7 +474,8 @@ async function applyWallpaperMode(enabled: boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 80))
     if (mainWindow && !mainWindow.isDestroyed()) exitWallpaperGeometry()
 
-    createTray()
+    // 托盘还在（一直是同一个实例），切回「应用模式用法」就行
+    applyTrayMode()
   }
 
   // 通知渲染进程同步状态（全屏标志可能变了）
@@ -453,7 +492,7 @@ async function toggleWallpaper(): Promise<boolean> {
   await applyWallpaperMode(wallpaperEnabled)
 
   sendToMain('wallpaper:state', wallpaperEnabled)
-  buildTrayMenu()
+  refreshTray()
   return wallpaperEnabled
 }
 
@@ -549,7 +588,7 @@ function createLoginWindow(): void {
       if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close()
       loginWindow = null
       isLoggedIn = true
-      buildTrayMenu()
+      refreshTray()
       sendToMain('auth:loginSuccess')
       return true
     } finally {
@@ -642,69 +681,309 @@ function createLoginWindow(): void {
   })
 }
 
-function buildTrayMenu(): void {
-  const send = (event: IpcEvent): void => sendToMain(event)
-  const template: Electron.MenuItemConstructorOptions[] = [
-    {
-      label: isPaused ? '播放' : '暂停',
-      click: () => send('tray:playControl'),
-    },
-    { label: '上一首', click: () => send('tray:prev') },
-    { label: '下一首', click: () => send('tray:next') },
-    {
-      label: MODE_NAMES[loopModeIndex] ?? MODE_NAMES[0],
-      click: () => send('tray:toggleMode'),
-    },
-    { type: 'separator' },
-    {
-      label: '设置歌单',
-      click: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.show()
-          mainWindow.focus()
-          send('tray:showPlaylist')
-        }
-      },
-    },
-    {
-      label: wallpaperEnabled ? '应用程序' : '桌面壁纸',
-      click: () => {
-        void toggleWallpaper()
-      },
-    },
-    { type: 'separator' },
-    {
-      label: isLoggedIn ? '退出登录' : '登录',
-      click: () => {
-        if (isLoggedIn) {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.show()
-            mainWindow.focus()
-            send('tray:showLogoutConfirm')
-          }
-        } else {
-          createLoginWindow()
-        }
-      },
-    },
-    { label: '退出应用', click: () => app.quit() },
-  ]
-  if (tray && !tray.isDestroyed()) {
-    tray.setContextMenu(Menu.buildFromTemplate(template))
+/**
+ * 刷新托盘（悬浮提示）
+ *
+ * 菜单已经改成自绘窗口（见 showTrayMenu），这里只维护 tooltip。
+ */
+function refreshTray(): void {
+  if (!tray || tray.isDestroyed()) return
+  // 视频标题里可能带 B 站搜索的 <em> 高亮标签，托盘提示要的是纯文本
+  const title = (trayTitle || '未在播放').replace(/<[^>]*>/g, '').trim() || '未在播放'
+  const tip = wallpaperEnabled
+    ? `BiLiMusicVideo-desktop · 壁纸模式\n${title}\n单击：播放 / 暂停　右键：菜单（媒体键可切歌）`
+    : `BiLiMusicVideo-desktop\n${title}\n单击：显示窗口　右键：菜单`
+  if (tip !== lastTrayTip) {
+    tray.setToolTip(tip)
+    lastTrayTip = tip
   }
+  tray.setContextMenu(null)
+}
+
+/** 托盘菜单窗口（自绘，见 showTrayMenu 的注释） */
+let trayMenuWindow: BrowserWindow | null = null
+/** 页面最后一次回报的内容高度 */
+let trayMenuHeight = 0
+/** 本次弹出是否已经显示过（避免 ready 回报两次时重复定位） */
+let trayMenuShown = false
+/** 失焦后延迟判断收起的定时器 */
+let blurHideTimer: ReturnType<typeof setTimeout> | null = null
+const TRAY_MENU_WIDTH = 208
+
+const trayMenuUrl = (): string =>
+  isDev && process.env.ELECTRON_RENDERER_URL
+    ? `${process.env.ELECTRON_RENDERER_URL}/tray-menu.html`
+    : ''
+
+function createTrayMenuWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    width: TRAY_MENU_WIDTH,
+    height: 300,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    // 要盖在任务栏和其它窗口之上，所以置顶到 screen-saver 层
+    alwaysOnTop: true,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+  win.setAlwaysOnTop(true, 'screen-saver')
+  win.setVisibleOnAllWorkspaces(true)
+  /**
+   * 失焦**不能立刻**收起（壁纸模式下的坑）
+   *
+   * 壁纸模式开着鼠标转发：用户按下鼠标的那一刻，库会往壁纸窗口塞一个合成
+   * `WM_LBUTTONDOWN`，Chromium 随即在那个窗口上 `SetCapture`（鼠标捕获）并抢走激活。
+   * 于是菜单窗口立刻收到 `blur` —— 如果这时直接 `hide()`，菜单在按键还没抬起来时就没了，
+   * 那个真实的 mouseup 也就不会发生在菜单项上，用户看到的就是「点了没反应」。
+   *
+   * 所以失焦后先看光标是不是还在菜单里：还在就说明这一下正是点菜单，等它抬起来；
+   * 挪走了（真正的「点别处」）才收。
+   */
+  win.on('blur', () => scheduleHideAfterBlur())
+  // 自绘菜单窗口不需要任何外链/新窗口
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event) => event.preventDefault())
+
+  const devUrl = trayMenuUrl()
+  if (devUrl) void win.loadURL(devUrl)
+  else void win.loadFile(path.join(__dirname, '../renderer/tray-menu.html'))
+  return win
+}
+
+/**
+ * 弹出托盘菜单
+ *
+ * **为什么不用原生菜单**（读的是 electron-as-wallpaper 的 Rust 源码）：
+ * `attach()` 在 `forwardMouseInput: true` 时会注册 `RIDEV_INPUTSINK`，
+ * 把**全系统的鼠标事件**都 `PostMessageA` 塞进壁纸窗口。原生弹出菜单只要收到
+ * 「菜单外的一次按下」就关掉 —— 点托盘图标那一下就同时被塞进壁纸窗口，
+ * 菜单刚出来就被自己关掉，点菜单项也会被打断。这个转发是全局装的，JS 侧关不掉。
+ *
+ * 所以自己开一个**独立的置顶窗口**画菜单：它不是壁纸窗口，收的是真实鼠标消息，
+ * 合成点击打不到它，而且能盖在任务栏上面。
+ */
+function showTrayMenu(): void {
+  if (!tray) return
+  trayMenuShown = false
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed()) {
+    trayMenuWindow = createTrayMenuWindow()
+    trayMenuWindow.webContents.once('did-finish-load', () => {
+      pushTrayMenuState()
+      // 页面还没回报高度时先用上次的高度兜底，别让菜单迟迟不出现
+      setTimeout(() => {
+        if (!trayMenuShown && trayMenuWindow && !trayMenuWindow.isDestroyed()) {
+          placeAndShowTrayMenu(trayMenuHeight || 300)
+        }
+      }, 400)
+    })
+    return
+  }
+  pushTrayMenuState()
+}
+
+/** 把最新状态推给菜单窗口 */
+function pushTrayMenuState(): void {
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed()) return
+  trayMenuWindow.webContents.send('trayMenu:state', getTrayMenuState())
+}
+
+function getTrayMenuState(): TrayMenuState {
+  return {
+    paused: isPaused,
+    loopModeIndex,
+    loopModeName: MODE_NAMES[loopModeIndex] ?? MODE_NAMES[0],
+    isLoggedIn,
+    wallpaperEnabled,
+    // 被「关闭到托盘」藏起来了：菜单那一项要显示「恢复窗口」
+    windowHidden: !!mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible(),
+    title: (trayTitle || '').replace(/<[^>]*>/g, '').trim(),
+  }
+}
+
+/** 页面量好高度后：定位 + 显示 */
+function sizeTrayMenu(height: number): void {
+  trayMenuHeight = Math.max(60, Math.round(height))
+  console.log(`[tray] 菜单页面回报高度 ${trayMenuHeight}px`)
+  if (trayMenuShown) return
+  placeAndShowTrayMenu(trayMenuHeight)
+}
+
+function placeAndShowTrayMenu(height: number): void {
+  const win = trayMenuWindow
+  if (!win || win.isDestroyed() || !tray) return
+  const trayBounds = tray.getBounds()
+  const display = screen.getDisplayMatching(trayBounds)
+  const area = display.workArea
+  const width = TRAY_MENU_WIDTH
+  const gap = 8
+
+  // 贴着托盘图标弹：默认在图标上方，上方放不下就改到下方；再夹进工作区
+  let x = Math.round(trayBounds.x + trayBounds.width / 2 - width / 2)
+  let y = Math.round(trayBounds.y - height - gap)
+  if (y < area.y + 4) y = Math.round(trayBounds.y + trayBounds.height + gap)
+  x = Math.min(Math.max(x, area.x + 4), area.x + area.width - width - 4)
+  y = Math.min(Math.max(y, area.y + 4), area.y + area.height - height - 4)
+
+  win.setBounds({ x, y, width, height })
+  trayMenuShown = true
+  win.show()
+  win.focus()
+  // 告诉主窗口「菜单开着」：壁纸模式下它要把合成点击吞掉
+  mainWindow?.webContents.send('trayMenu:visibility', true)
+}
+
+/** 收起菜单（同时清掉失焦延迟） */
+function hideTrayMenu(): void {
+  if (blurHideTimer) {
+    clearTimeout(blurHideTimer)
+    blurHideTimer = null
+  }
+  if (trayMenuWindow && !trayMenuWindow.isDestroyed() && trayMenuWindow.isVisible()) {
+    trayMenuWindow.hide()
+  }
+  trayMenuShown = false
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('trayMenu:visibility', false)
+  }
+}
+
+/**
+ * 失焦后判断要不要收起（见 createTrayMenuWindow 里 blur 的注释）
+ *
+ * 光标还在菜单上 = 正在点菜单（壁纸模式的鼠标转发抢走了激活），等它点完；
+ * 光标已经移开 = 真的点了别处，收起。
+ */
+function scheduleHideAfterBlur(): void {
+  if (!trayMenuWindow || trayMenuWindow.isDestroyed() || !trayMenuWindow.isVisible()) return
+  if (blurHideTimer) clearTimeout(blurHideTimer)
+  blurHideTimer = setTimeout(() => {
+    blurHideTimer = null
+    const win = trayMenuWindow
+    if (!win || win.isDestroyed() || !win.isVisible()) return
+    const b = win.getBounds()
+    const c = screen.getCursorScreenPoint()
+    const inside = c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height
+    if (!inside) {
+      hideTrayMenu()
+      return
+    }
+    // 还在菜单里：继续观察，别把正在进行的这一下点掉
+    scheduleHideAfterBlur()
+  }, 400)
+}
+
+/** 执行菜单动作：先收起菜单，再复用应用里已有的那套事件 */
+function runTrayMenuAction(action: TrayMenuAction): void {
+  hideTrayMenu()
+  switch (action) {
+    case 'playControl':
+      sendToMain('tray:playControl')
+      break
+    case 'prev':
+      sendToMain('tray:prev')
+      break
+    case 'next':
+      sendToMain('tray:next')
+      break
+    case 'toggleMode':
+      sendToMain('tray:toggleMode')
+      break
+    case 'showPlaylist':
+      focusMainWindow()
+      sendToMain('tray:showPlaylist')
+      break
+    case 'toggleWallpaper':
+      void toggleWallpaper()
+      break
+    case 'restoreWindow':
+      void restoreWindow()
+      break
+    case 'login':
+      createLoginWindow()
+      break
+    case 'logout':
+      focusMainWindow()
+      sendToMain('tray:showLogoutConfirm')
+      break
+    case 'quit':
+      app.quit()
+      break
+  }
+}
+
+/**
+ * 把窗口显示出来（托盘左键 / 菜单里的「恢复窗口」）
+ *
+ * 壁纸模式下窗口挂在桌面层，`show()/focus()` 是看不见效果的，
+ * 所以先退出壁纸模式再显示 —— 用户要的「点一下就回到窗口」。
+ */
+async function restoreWindow(): Promise<void> {
+  if (wallpaperEnabled) {
+    try {
+      await toggleWallpaper()
+    } catch (err) {
+      console.warn('[win] 退出壁纸模式失败:', err)
+    }
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/** 把主窗口叫到前台（壁纸模式下它挂在桌面层，show/focus 只是尽量） */
+function focusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (wallpaperEnabled) return
+  mainWindow.show()
+  mainWindow.focus()
 }
 
 function createTray(): void {
   const icon = loadIcon('bili.ico')
   tray = new Tray(icon)
   tray.setToolTip('B站音乐视频')
+  /**
+   * 左键：直接显示窗口
+   *
+   * 壁纸模式下窗口在桌面层，所以会先退出壁纸模式再显示（`restoreWindow`）。
+   * 之前壁纸模式把左键当播放/暂停，和用户预期不符，已经去掉。
+   */
   tray.on('click', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
-      mainWindow.focus()
-    }
+    void restoreWindow()
   })
-  buildTrayMenu()
+  // 右键（两种模式都是）：弹自绘菜单
+  tray.on('right-click', () => showTrayMenu())
+  applyTrayMode()
+}
+
+/**
+ * 模式切换后刷新托盘表现
+ *
+ * 菜单本身是自绘窗口（`showTrayMenu`），两种模式共用；这里只需要更新 tooltip
+ * 与「左键干什么」的语义（左键行为在 createTray 的 click 回调里按 wallpaperEnabled 分支）。
+ *
+ * 顺带说明**为什么放弃原生菜单**（读的是 electron-as-wallpaper 的 Rust 源码，不是猜的）：
+ * `attach()` 除了 `SetParent(hwnd, WorkerW)` 把窗口挂到桌面图标后面，还会在
+ * `forwardMouseInput: true` 时注册 `RIDEV_INPUTSINK` 原始输入，把**全系统的鼠标事件**
+ * 都 `PostMessageA(壁纸窗口, WM_LBUTTONDOWN/UP, …)`。原生弹出菜单只要收到
+ * 「菜单外的一次按下」就关掉 —— 点托盘图标那一下就同时被塞进壁纸窗口，
+ * 菜单刚弹出来就被自己关掉，点菜单项也会被打断；这个转发是 Rust 侧全局装的，JS 关不掉。
+ */
+function applyTrayMode(): void {
+  refreshTray()
 }
 
 async function grabCookiesSilently(): Promise<void> {
@@ -765,7 +1044,7 @@ async function executeLogout(): Promise<void> {
     }
   }
   sendToMain('auth:logout')
-  buildTrayMenu()
+  refreshTray()
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +1061,7 @@ void app.whenReady().then(async () => {
 
   // 配置变化时同步托盘菜单（例如壁纸模式被另一处改动）
   onSettingChange(() => {
-    buildTrayMenu()
+    refreshTray()
   })
 
   session.defaultSession.webRequest.onBeforeSendHeaders(
@@ -816,7 +1095,7 @@ void app.whenReady().then(async () => {
     getScreenWorkArea,
     setLoggedIn: (loggedIn) => {
       isLoggedIn = loggedIn
-      buildTrayMenu()
+      refreshTray()
     },
     updateTrayState: (state) => {
       if (state.paused !== undefined) isPaused = state.paused
@@ -824,7 +1103,24 @@ void app.whenReady().then(async () => {
         const idx = PLAY_LOOP_MODES.indexOf(state.loopMode as (typeof PLAY_LOOP_MODES)[number])
         if (idx >= 0) loopModeIndex = idx
       }
-      buildTrayMenu()
+      // 悬浮提示里带上当前歌曲：壁纸模式下原生菜单用不了，tooltip 是唯一的托盘反馈
+      if (state.title !== undefined) trayTitle = state.title
+      refreshTray()
+    },
+    getTrayMenuState: () => getTrayMenuState(),
+    runTrayMenuAction: (action) => runTrayMenuAction(action),
+    sizeTrayMenu: (height) => sizeTrayMenu(height),
+    hideTrayMenu: () => hideTrayMenu(),
+    setProgress: (progress, paused) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (progress < 0) {
+        mainWindow.setProgressBar(-1)
+        return
+      }
+      // 任务栏进度：暂停时用「已暂停」样式（Windows 上是黄色）
+      mainWindow.setProgressBar(Math.min(1, Math.max(0, progress)), {
+        mode: paused ? 'paused' : 'normal',
+      })
     },
     executeLogout,
     quitApp: () => app.quit(),
@@ -957,6 +1253,8 @@ const watchDisplayChanges = (): void => {
 
 // 退出前把防抖里待写入的配置/歌单刷到磁盘，避免最后几秒的修改丢失
 app.on('before-quit', () => {
+  // 置位后「关闭到托盘」就不再拦截窗口关闭了，否则会永远退不掉
+  isQuitting = true
   flushSetting()
   flushPlaylists()
 })

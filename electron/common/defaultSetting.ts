@@ -22,6 +22,10 @@ const defaultSetting = {
 
   // #region common
   'common.wallpaperMode': false,
+  /** 点关闭按钮时最小化到系统托盘（不退出），默认关：保持「点 X 就退出」的习惯 */
+  'common.closeToTray': false,
+  /** 任务栏图标上显示播放进度，默认开 */
+  'common.taskbarProgress': true,
   /** 玻璃底色：默认白色（浅色主题那套观感） */
   'common.themeColor': DEFAULT_THEME_COLOR,
   /** 浮层文字颜色：默认白色 */
@@ -48,12 +52,17 @@ const defaultSetting = {
   'player.isMute': false,
   'player.loopMode': 'listLoop',
   'player.playIndex': 0,
-  /** 自动续播：下次打开恢复到上次的歌单/歌曲/进度 */
+  /**
+   * 记住播放进度：下次打开回到上次的歌单 / 歌曲 / 播放位置
+   *
+   * 原来拆成「自动续播」+「恢复播放进度」两个开关，实际用起来没人会只开一个
+   * （回到那首歌却不回进度，或者反之），已经合并成一个。
+   */
   'player.resumeOnStart': true,
-  /** 续播时连播放进度一起恢复 */
-  'player.resumePlaybackTime': true,
   /** 上次播放到的秒数 */
   'player.resumeTime': 0,
+  /** 声音输出设备变化时暂停，默认开（避免声音跑到刚插上的设备上） */
+  'player.pauseOnDeviceChange': true,
   /** 默认视频清晰度：1080P 60帧（实际会按登录态/会员/视频可用档位降级） */
   'player.videoQuality': DEFAULT_VIDEO_QN,
   /** 默认音质：192K */

@@ -19,6 +19,8 @@ import type {
   DragOffset,
   IpcChannelMap,
   RemoveListener,
+  TrayMenuAction,
+  TrayMenuState,
   TrayState,
   UserInfo,
 } from '@common/types/ipc'
@@ -62,6 +64,23 @@ const api = {
   onTrayShowPlaylist: (cb: () => void): RemoveListener => rendererOn('tray:showPlaylist', cb),
   onTrayShowLogoutConfirm: (cb: () => void): RemoveListener =>
     rendererOn('tray:showLogoutConfirm', cb),
+  // #endregion
+
+  // #region 自绘托盘菜单
+  trayMenuGetState: (): Promise<TrayMenuState> => rendererInvoke('trayMenu:getState'),
+  trayMenuAction: (action: TrayMenuAction): Promise<void> =>
+    rendererInvoke('trayMenu:action', action),
+  trayMenuReady: (height: number): Promise<void> => rendererInvoke('trayMenu:ready', { height }),
+  trayMenuClose: (): Promise<void> => rendererInvoke('trayMenu:close'),
+  onTrayMenuState: (cb: (state: TrayMenuState) => void): RemoveListener =>
+    rendererOn('trayMenu:state', cb),
+  onTrayMenuVisibility: (cb: (visible: boolean) => void): RemoveListener =>
+    rendererOn('trayMenu:visibility', cb),
+  // #endregion
+
+  // #region 任务栏进度
+  setProgress: (progress: number, paused: boolean): Promise<void> =>
+    rendererInvoke('window:setProgress', { progress, paused }),
   // #endregion
 
   // #region B 站接口
