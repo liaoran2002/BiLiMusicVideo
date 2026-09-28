@@ -1,6 +1,6 @@
 {
   "name": "BiLiMusicVideo-desktop",
-  "version": "1.0",
+  "version": "1.0.0",
   "author": "liaoran2002",
   "description": "BLMV：把音乐歌单变成B站MV视频播放列表的桌面播放器。",
   "main": "./out/main/index.js",
