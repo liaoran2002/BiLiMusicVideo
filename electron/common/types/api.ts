@@ -16,6 +16,7 @@
 import type { AppSetting } from './app_setting'
 import type {
   DragOffset,
+  ParsedVideoInfo,
   RemoveListener,
   TrayMenuAction,
   TrayMenuState,
@@ -53,13 +54,19 @@ export interface RendererAPI {
   onTrayPrev: (cb: () => void) => RemoveListener
   onTrayNext: (cb: () => void) => RemoveListener
   onTrayToggleMode: (cb: () => void) => RemoveListener
+  /** 托盘菜单进度条：0~1 的比例 */
+  onTraySeek: (cb: (ratio: number) => void) => RemoveListener
+  /** 托盘菜单音量：0~100 */
+  onTrayVolume: (cb: (volume: number) => void) => RemoveListener
+  onTrayToggleMute: (cb: () => void) => RemoveListener
   onTrayShowPlaylist: (cb: () => void) => RemoveListener
   onTrayShowLogoutConfirm: (cb: () => void) => RemoveListener
   // #endregion
 
   // #region 自绘托盘菜单（菜单窗口用它渲染与回报尺寸；主窗口用 visibility 吞掉合成点击）
   trayMenuGetState: () => Promise<TrayMenuState>
-  trayMenuAction: (action: TrayMenuAction) => Promise<void>
+  /** value 用于进度（0~1）与音量（0~100） */
+  trayMenuAction: (action: TrayMenuAction, value?: number) => Promise<void>
   trayMenuReady: (height: number) => Promise<void>
   trayMenuClose: () => Promise<void>
   onTrayMenuState: (cb: (state: TrayMenuState) => void) => RemoveListener
@@ -72,7 +79,10 @@ export interface RendererAPI {
 
   // #region B 站接口
   getUserInfo: () => Promise<UserInfo>
-  searchSong: (keyword: string) => Promise<{ data: unknown }>
+  /** skipCache=true 用于视频列表的刷新按钮（真的重搜，同时保住已解析的播放地址） */
+  searchSong: (keyword: string, skipCache?: boolean) => Promise<{ data: unknown }>
+  /** 「添加视频」：解析 B 站链接 / BV 号 */
+  parseVideo: (input: string) => Promise<ParsedVideoInfo>
   resolveVideoUrl: (
     bvid: string,
     keyword?: string,

@@ -15,6 +15,21 @@
 export type { AppSetting } from './app_setting'
 
 /**
+ * 「添加视频」解析出来的信息（主进程 -> 渲染层）
+ *
+ * 放在这里而不是 import biliApi 的类型：biliApi 是主进程模块，
+ * 渲染层的类型链路不该把它拖进来。
+ */
+export interface ParsedVideoInfo {
+  bvid: string
+  title: string
+  pic: string | null
+  author: string | null
+  /** 时长（秒） */
+  duration: number | null
+}
+
+/**
  * dash 双轨（主进程 -> 渲染层）
  *
  * dash 的视频和音频是两条独立的流，只给一条会没有声音，
@@ -83,7 +98,16 @@ export interface IpcChannelMap {
 
   // #region bilibili api
   'api:getUserInfo': { params: void; result: UserInfo }
-  'api:searchSong': { params: { keyword: string }; result: { data: unknown } }
+  'api:searchSong': {
+    params: {
+      keyword: string
+      /** 视频列表的刷新按钮：绕过缓存真的重搜（同时会与旧条目合并，保住已解析的地址） */
+      skipCache?: boolean
+    }
+    result: { data: unknown }
+  }
+  /** 「添加视频」：解析 B 站链接 / BV 号，取回标题、封面、UP 主 */
+  'api:parseVideo': { params: { input: string }; result: ParsedVideoInfo }
   'api:resolveVideo': {
     params: {
       bvid: string
@@ -162,8 +186,8 @@ export interface IpcChannelMap {
   'tray:updateState': { params: TrayState; result: void }
   /** 自绘托盘菜单：取一次当前状态（播放 / 循环 / 登录 / 壁纸） */
   'trayMenu:getState': { params: void; result: TrayMenuState }
-  /** 自绘托盘菜单：执行一个动作 */
-  'trayMenu:action': { params: TrayMenuAction; result: void }
+  /** 自绘托盘菜单：执行一个动作；value 用于进度（0~1）与音量（0~100） */
+  'trayMenu:action': { params: { action: TrayMenuAction; value?: number }; result: void }
   /** 自绘托盘菜单：页面量好自己的高度后回报，主进程据此定位并显示 */
   'trayMenu:ready': { params: { height: number }; result: void }
   /** 自绘托盘菜单：收起 */
@@ -199,6 +223,12 @@ export interface IpcEventMap {
   'tray:toggleMode': void
   'tray:showPlaylist': void
   'tray:showLogoutConfirm': void
+  /** 托盘菜单拖动进度条：payload 是 0~1 的比例 */
+  'tray:seek': number
+  /** 托盘菜单调音量：payload 是 0~100 */
+  'tray:volume': number
+  /** 托盘菜单点音量图标：静音开关 */
+  'tray:toggleMute': void
   'wallpaper:state': boolean
   'window:maximized': boolean
   'window:fullscreen': boolean
@@ -248,14 +278,29 @@ export interface TrayState {
   paused?: boolean
   /** 当前循环模式（字符串枚举，见 PLAY_LOOP_MODES） */
   loopMode?: string
-  /** 当前在播什么（视频标题优先），壁纸模式下用来更新托盘悬浮提示 */
+  /** 当前在播什么（`歌曲名 - 歌手名`），托盘提示与菜单顶部都用它 */
   title?: string
+  /** 当前播放位置（秒）——托盘菜单里的进度条要 */
+  position?: number
+  /** 视频总时长（秒） */
+  duration?: number
+  /** 当前音量（0~100） */
+  volume?: number
+  muted?: boolean
+  /**
+   * 渲染层认定的登录态
+   *
+   * 一起带上是防漂移：主进程那份 `isLoggedIn` 只由 `auth:setLoggedIn` 改，
+   * 万一哪次没同步到，托盘菜单就会把「退出登录」显示成「登录」。
+   */
+  isLoggedIn?: boolean
 }
 
 /**
  * 自绘托盘菜单能执行的动作
  *
- * 与原生菜单项一一对应（放弃原生菜单的原因见 main/index.ts 的 applyTrayMode）。
+ * 菜单是一个迷你控制台：进度条 / 音量 / 上一首 / 播放暂停 / 下一首 / 循环模式，
+ * 再加设置歌单、壁纸模式、退出登录、退出程序。
  */
 export type TrayMenuAction =
   | 'playControl'
@@ -266,6 +311,12 @@ export type TrayMenuAction =
   | 'toggleWallpaper'
   /** 窗口被收到托盘里时用它把窗口叫回来（菜单里那一项会变成「恢复窗口」） */
   | 'restoreWindow'
+  /** 进度条：value = 0~1 的比例 */
+  | 'seek'
+  /** 音量：value = 0~100 */
+  | 'volume'
+  /** 静音开关 */
+  | 'toggleMute'
   | 'login'
   | 'logout'
   | 'quit'
@@ -283,4 +334,11 @@ export interface TrayMenuState {
   windowHidden: boolean
   /** 当前在播什么（`歌曲名 - 歌手名`）；空表示没在播 */
   title: string
+  /** 当前播放位置（秒） */
+  position: number
+  /** 视频总时长（秒） */
+  duration: number
+  /** 当前音量（0~100） */
+  volume: number
+  muted: boolean
 }

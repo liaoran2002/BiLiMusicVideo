@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { PLAYLIST_DATA_VERSION, STORE_NAMES } from '@common/constants'
 import type {
   DuplicatePolicy,
+  FavoriteVideo,
   PlaylistRecord,
   PlaylistSaveParams,
   PlaylistSong,
@@ -162,7 +163,35 @@ const normalizeRecord = (input: Partial<PlaylistRecord>): PlaylistRecord | null 
       typeof input.lastIndex === 'number' && input.lastIndex >= 0 ? input.lastIndex : 0,
     videoCache:
       input.videoCache && typeof input.videoCache === 'object' ? input.videoCache : {},
+    // 收藏视频：形状不合法就整条丢掉，别把脏数据写回磁盘
+    favorites: normalizeFavorites(input.favorites),
   }
+}
+
+/** 每首歌收藏的视频：key 是搜索键，值是一组 { bvid, title, ... } */
+const normalizeFavorites = (
+  input: unknown,
+): Record<string, FavoriteVideo[]> | undefined => {
+  if (!input || typeof input !== 'object') return undefined
+  const out: Record<string, FavoriteVideo[]> = {}
+  for (const [song, list] of Object.entries(input as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue
+    const items: FavoriteVideo[] = []
+    for (const raw of list) {
+      const item = raw as Partial<FavoriteVideo>
+      if (!item || typeof item.bvid !== 'string' || !item.bvid) continue
+      items.push({
+        bvid: item.bvid,
+        title: typeof item.title === 'string' ? item.title : '',
+        cover: typeof item.cover === 'string' ? item.cover : null,
+        author: typeof item.author === 'string' ? item.author : null,
+        duration: typeof item.duration === 'number' ? item.duration : null,
+        savedAt: typeof item.savedAt === 'number' ? item.savedAt : Date.now(),
+      })
+    }
+    if (items.length > 0) out[song] = items
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** 初始化（app.whenReady 之后调用） */
@@ -306,11 +335,14 @@ export const syncPlaylist = async (
     // 曲目数变化可能让下标越界
     if (target.lastIndex >= songs.length) target.lastIndex = 0
 
-    // 清掉已不存在歌曲的缓存（videoCache 的 key 是搜索键，不是下标）
-    if (target.videoCache) {
+    // 清掉已不存在歌曲的缓存（videoCache / favorites 的 key 都是搜索键，不是下标）
+    if (target.videoCache || target.favorites) {
       const valid = new Set(songs.map(toSearchKey))
-      for (const key of Object.keys(target.videoCache)) {
-        if (!valid.has(key)) delete target.videoCache[key]
+      for (const key of Object.keys(target.videoCache ?? {})) {
+        if (!valid.has(key)) delete target.videoCache![key]
+      }
+      for (const key of Object.keys(target.favorites ?? {})) {
+        if (!valid.has(key)) delete target.favorites![key]
       }
     }
 

@@ -27,6 +27,25 @@ export interface VideoRef {
 }
 
 /**
+ * 一首歌「收藏」的视频
+ *
+ * 收藏是**按歌**记的：重新搜索这首歌时，收藏的条目要固定排在最前面，
+ * 所以除了 bvid 还要把标题 / 封面 / UP 主一起存下来 ——
+ * 否则搜索没搜到它的时候（下架、改名、排序变化）列表里就只剩一个空壳。
+ */
+export interface FavoriteVideo {
+  bvid: string
+  title: string
+  cover?: string | null
+  /** UP 主 */
+  author?: string | null
+  /** 时长（秒） */
+  duration?: number | null
+  /** 收藏时间（毫秒时间戳） */
+  savedAt: number
+}
+
+/**
  * 歌单里的一首歌（结构化）
  *
  * 之前 songs 是 `"歌名-歌手"` 字符串数组，没法展示封面/专辑/歌手。
@@ -81,6 +100,12 @@ export interface PlaylistRecord {
   lastIndex: number
   /** key = `"歌名-歌手"`（toSearchKey），value = 已选定的视频 */
   videoCache?: Record<string, VideoRef>
+  /**
+   * key = `"歌名-歌手"`（toSearchKey），value = 这首歌收藏的视频
+   *
+   * 收藏项在视频列表里固定排在最前面，并且重新搜索时不会丢（去重按 bvid）。
+   */
+  favorites?: Record<string, FavoriteVideo[]>
 }
 
 

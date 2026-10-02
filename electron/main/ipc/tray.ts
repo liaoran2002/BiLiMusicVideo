@@ -11,8 +11,8 @@ export const registerTrayHandlers = (context: IpcContext): void => {
 
   // 自绘托盘菜单：状态 / 动作 / 尺寸回报 / 收起
   mainHandle('trayMenu:getState', () => context.getTrayMenuState())
-  mainHandle('trayMenu:action', (action) => {
-    context.runTrayMenuAction(action)
+  mainHandle('trayMenu:action', ({ action, value }) => {
+    context.runTrayMenuAction(action, value)
   })
   mainHandle('trayMenu:ready', ({ height }) => {
     context.sizeTrayMenu(height)

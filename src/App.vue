@@ -1,6 +1,11 @@
 <template>
   <div id="app">
-    <div class="titlebar">
+    <!--
+      壁纸模式下整条标题栏隐藏（用户要求）：那时候窗口就是一块桌面背景，
+      所有操作走托盘菜单；退出壁纸模式再显示回来。
+      用 class 而不是 v-if：组件不卸载，内部状态（音量拖动等）不会丢。
+    -->
+    <div class="titlebar" :class="{ 'wm-hidden': wallpaperEnabled }">
       <!-- 左侧：歌单入口（点一下直接打开歌单管理弹窗，没有二级菜单） -->
       <div class="titlebar-left">
         <PlaylistPanel @manage="playlistManagerVisible = true" />
@@ -103,11 +108,19 @@
       :title="listType == 'list' ? listName : songName"
       :list="listType == 'list' ? songs : videoList"
       :currentIndex="listType == 'list' ? currentIndex : currentVideoIndex"
+      :favorites="favoriteBvids"
       @showList="showList"
       @changeSong="changeSong"
       @changeVideo="changeVideo"
+      @refresh="onListRefresh"
+      @addVideo="addVideoVisible = true"
+      @toggleFavorite="onToggleFavorite"
     ></showList>
+
+    <!-- 「添加视频」：解析链接后加到这首歌的收藏里 -->
+    <AddVideoDialog v-model="addVideoVisible" @confirm="onAddVideo" />
     <biliVideoControls
+      :class="{ 'wm-hidden': wallpaperEnabled }"
       :videoName="videoName || songName"
       :cover="currentCover() || ''"
       :subtitle="controlsSubtitle"
@@ -169,6 +182,7 @@ import defaultSetting from '@common/defaultSetting';
 import { PLAY_LOOP_MODES } from '@common/constants';
 import biliVideoControls from './components/biliVideoControls.vue';
 import showList from './components/showList.vue';
+import AddVideoDialog from './components/AddVideoDialog.vue';
 import PlaylistPanel from './components/PlaylistPanel.vue';
 import PlaylistManager from './components/PlaylistManager.vue';
 import SettingsDialog from './components/SettingsDialog.vue';
@@ -206,10 +220,19 @@ import type {
   VideoControlAction,
   VideoElement,
 } from './types/app';
+import type { ParsedVideoInfo } from '@common/types/ipc';
 
 export default defineComponent({
   name: 'App',
-  components: { biliVideoControls, showList, PlaylistPanel, PlaylistManager, SettingsDialog, AboutDialog },
+  components: {
+    biliVideoControls,
+    showList,
+    PlaylistPanel,
+    PlaylistManager,
+    SettingsDialog,
+    AboutDialog,
+    AddVideoDialog,
+  },
   setup() {
     // Pinia 只做渲染进程的响应式副本；真正的持久化在主进程。
     // 注意 setup() 会在 options 的 data/computed/methods 之前执行，
@@ -219,6 +242,10 @@ export default defineComponent({
     return { settingStore, playlistsStore };
   },
   computed: {
+    /** 当前这首歌收藏的 bvid 列表（视频列表里显示实心爱心） */
+    favoriteBvids(): string[] {
+      return this.playlistsStore.getFavorites(this.songName).map((f) => f.bvid);
+    },
     /**
      * 关键词加权配置直接读 store，不再在组件里硬编码一份。
      *
@@ -368,12 +395,17 @@ export default defineComponent({
       removeTrayShowPlaylist: null,
       removeTrayShowLogoutConfirm: null,
       removeWallpaperState: null,
+      removeTraySeek: null,
+      removeTrayVolume: null,
+      removeTrayToggleMute: null,
       removeTrayMenuListener: null,
       lastNonZeroVolume: 0,
       /** 设置弹窗 */
       settingsVisible: false,
       /** 关于弹窗 */
       aboutVisible: false,
+      /** 「添加视频」弹窗（视频列表右上角的加号） */
+      addVideoVisible: false,
       /** 视频请求竞态令牌（切视频时防乱序覆盖） */
       _videoToken: 0,
       /** 同一个视频的连续失败次数，达到上限就跳过该曲，避免无限重试 */
@@ -407,6 +439,8 @@ export default defineComponent({
       _lastMediaPosAt: 0,
       /** 上次发给任务栏的进度指纹（百分比 + 暂停态），避免每次 timeupdate 都发 IPC */
       _lastTaskbarKey: '',
+      /** 上次给托盘菜单推状态的时间（菜单开着时按 300ms 节流） */
+      _lastTraySyncAt: 0,
       /** 定时自动同步的定时器 */
       _syncTimer: null as ReturnType<typeof setInterval> | null,
       /** 定时器对应的「策略指纹」，用来避免被无关的配置广播反复重建 */
@@ -636,7 +670,8 @@ export default defineComponent({
       try {
         const res = await electronApi.searchSong(songName);
         const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
-        this.videoList = this.sortSearchedVideos(videos, songName);
+        // 收藏的视频固定排在最前面，并按 bvid 去重
+        this.videoList = this.applyFavoriteOrder(this.sortSearchedVideos(videos, songName), songName);
         this.videoListKeyword = songName;
       } catch (err) {
         // 搜索失败不致命：至少还能把歌单里记住的那条播起来
@@ -682,7 +717,18 @@ export default defineComponent({
         this.userName = info.name;
         this.isLoggedIn = true;
         electronApi.setLoggedIn(true);
-      } catch {
+      } catch (err) {
+        /**
+         * 拉取失败 ≠ 没登录
+         *
+         * 主进程把两者分开了：`未登录` 是 nav 明确说的，`NAV_FAILED` 是这次请求没问到。
+         * 后者（网络抖动、风控）不能把界面切成未登录 —— 否则托盘菜单会显示「登录」、
+         * 解析视频还会按未登录档位取流并写进缓存，表现就是「明明登录着却每次都重新解析」。
+         */
+        if (this.errMsg(err) === 'NAV_FAILED') {
+          console.warn('[auth] 登录态查询失败（网络问题），保持原状态');
+          return;
+        }
         this.isLoggedIn = false;
         this.userFace = '';
         this.userName = '';
@@ -1388,6 +1434,15 @@ export default defineComponent({
       this.persistPlaybackStateThrottled();
       // 同步系统媒体控件的进度条
       this.updateMediaPositionThrottled();
+      /**
+       * 托盘菜单开着时把进度推过去（菜单里那条进度条要动）
+       *
+       * 只在菜单开着时推：平时推是白费 IPC（`timeupdate` 一秒好几次）。
+       */
+      if (this.trayMenuOpen && Date.now() - this._lastTraySyncAt > 300) {
+        this._lastTraySyncAt = Date.now();
+        this.syncTrayState();
+      }
     },
     /**
      * 记录 `<video>` 实际解码出来的分辨率
@@ -1485,6 +1540,8 @@ export default defineComponent({
         'player.volume': volume,
         'player.isMute': this.isMuted,
       });
+      // 托盘菜单里的音量条要跟着变（菜单开着时）
+      this.syncTrayState();
     },
     /**
      * 静音 / 解除静音
@@ -1583,7 +1640,6 @@ export default defineComponent({
       const songName = this.getSongName(index);
       if (!songName) return;
       const token = ++this._songToken;
-
       /**
        * 换歌 = 上一次「手动挑的清晰度 / 音质」作废
        *
@@ -1631,7 +1687,8 @@ export default defineComponent({
         if (token !== this._songToken) return;
         // searchSong 的 data 形状由搜索接口决定，这里收敛成 BiliVideo
         const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
-        this.videoList = this.sortSearchedVideos(videos, songName);
+        // 收藏的视频固定排在最前面，并按 bvid 去重
+        this.videoList = this.applyFavoriteOrder(this.sortSearchedVideos(videos, songName), songName);
         this.videoListKeyword = songName;
         if (this.videoList.length > 0) {
           const selectedBvid =
@@ -1901,6 +1958,154 @@ export default defineComponent({
       return this.currentVideoCover();
     },
     /**
+     * 收藏的视频排到最前面，并按 bvid 去重
+     *
+     * 收藏项如果这次搜索里也有，就用搜索里的新数据（标题/封面可能变了）；
+     * 搜索里没有（下架、排序变化）就用收藏时存下来的快照，保证它不会凭空消失。
+     */
+    applyFavoriteOrder(list: BiliVideo[], songName: string): BiliVideo[] {
+      const favs = this.playlistsStore.getFavorites(songName);
+      const seen = new Set<string>();
+      const out: BiliVideo[] = [];
+      for (const fav of favs) {
+        if (seen.has(fav.bvid)) continue;
+        seen.add(fav.bvid);
+        const hit = list.find((v) => v.bvid === fav.bvid);
+        out.push(
+          hit ?? {
+            bvid: fav.bvid,
+            title: fav.title,
+            pic: fav.cover ?? null,
+            author: fav.author ?? null,
+            duration: fav.duration ?? null,
+          },
+        );
+      }
+      for (const v of list) {
+        if (!v?.bvid || seen.has(v.bvid)) continue;
+        seen.add(v.bvid);
+        out.push(v);
+      }
+      return out;
+    },
+    /**
+     * 左上角刷新（两个列表共用一个按钮）
+     *
+     * 歌曲列表 -> 重新同步当前歌单；视频列表 -> 重新搜索这首歌（收藏仍在最前面）。
+     */
+    async onListRefresh(): Promise<void> {
+      if (this.listType === 'list') {
+        const id = this.playlistsStore.currentId;
+        if (!id) return;
+        try {
+          const results = await this.playlistsStore.sync([id]);
+          await this.reportSyncResults(results, '同步');
+          await this.reloadCurrentPlaylistSongs();
+        } catch (err) {
+          this.$message.error('同步失败：' + this.errMsg(err));
+        }
+        return;
+      }
+      await this.refreshVideoList();
+    },
+    /**
+     * 重新搜索这首歌的候选视频
+     *
+     * `skipCache` 走主进程真实重搜（同时会与旧条目合并，保住已解析的播放地址）；
+     * 不重播当前视频，只是把列表换了 —— 用户要的是「刷新列表」。
+     */
+    async refreshVideoList(): Promise<void> {
+      const songName = this.songName;
+      if (!songName) return;
+      const token = this._songToken;
+      try {
+        const res = await electronApi.searchSong(songName, true);
+        if (token !== this._songToken) return;
+        const videos = (res.data as { result?: BiliVideo[] } | null)?.result ?? [];
+        this.videoList = this.applyFavoriteOrder(
+          this.sortSearchedVideos(videos, songName),
+          songName,
+        );
+        this.videoListKeyword = songName;
+        // 当前播放的视频可能还在列表里（下标要跟着更新），也可能被搜没了
+        this.currentVideoIndex = this.videoList.findIndex((v) => v.bvid === this.currentBvid);
+        this.$message.success(`已重新搜索《${songName}》，找到 ${this.videoList.length} 个视频`);
+      } catch (err) {
+        this.$message.error(`重新搜索失败：${this.errMsg(err)}`);
+      }
+    },
+    /**
+     * 时长统一成秒（收藏里存数字，展示时再格式化）
+     *
+     * B 站搜索接口给的是 `"4:03"` 这类字符串，view 接口给秒数 ——
+     * 存之前统一成秒，免得两种形状在下游到处判断。
+     */
+    durationToSeconds(raw: number | string | null | undefined): number | null {
+      if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : null;
+      if (typeof raw === 'string') {
+        const s = raw.trim();
+        if (!s) return null;
+        const parts = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+        if (parts) {
+          const a = Number(parts[1]);
+          const b = Number(parts[2]);
+          const c = parts[3] ? Number(parts[3]) : 0;
+          return parts[3] ? a * 3600 + b * 60 + c : a * 60 + b;
+        }
+        const n = Number(s);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      }
+      return null;
+    },
+    /** 收藏 / 取消收藏视频列表里的某一项 */
+    async onToggleFavorite(bvid: string): Promise<void> {
+      if (!bvid || !this.songName) return;
+      const favs = this.playlistsStore.getFavorites(this.songName);
+      if (favs.some((f) => f.bvid === bvid)) {
+        await this.playlistsStore.removeFavorite(this.songName, bvid);
+        this.videoList = this.applyFavoriteOrder(this.videoList, this.songName);
+        this.currentVideoIndex = this.videoList.findIndex((v) => v.bvid === this.currentBvid);
+        return;
+      }
+      const item = this.videoList.find((v) => v.bvid === bvid);
+      await this.playlistsStore.addFavorite(this.songName, {
+        bvid,
+        title: item?.title ?? '',
+        cover: item?.pic ?? null,
+        author: item?.author ?? null,
+        duration: this.durationToSeconds(item?.duration),
+      });
+      // 收藏项要排到最前面：立刻重排，界面不用等下次搜索
+      this.videoList = this.applyFavoriteOrder(this.videoList, this.songName);
+      this.currentVideoIndex = this.videoList.findIndex((v) => v.bvid === this.currentBvid);
+    },
+    /** 「添加视频」确认：加到这首歌的收藏里（也就是列表最前面） */
+    async onAddVideo(info: ParsedVideoInfo): Promise<void> {
+      if (!this.songName) return;
+      await this.playlistsStore.addFavorite(this.songName, {
+        bvid: info.bvid,
+        title: info.title,
+        cover: info.pic,
+        author: info.author,
+        duration: info.duration,
+      });
+      if (!this.videoList.some((v) => v.bvid === info.bvid)) {
+        this.videoList = [
+          {
+            bvid: info.bvid,
+            title: info.title,
+            pic: info.pic,
+            author: info.author,
+            duration: info.duration,
+          },
+          ...this.videoList,
+        ];
+      }
+      this.videoList = this.applyFavoriteOrder(this.videoList, this.songName);
+      this.currentVideoIndex = this.videoList.findIndex((v) => v.bvid === this.currentBvid);
+      this.$message.success(`已添加《${info.title || info.bvid}》`);
+    },
+    /**
      * 更新 Windows 系统媒体控件（SMTC）
      *
      * 渲染进程用的是标准 Media Session API，Electron 在 Windows 上会把它桥接到
@@ -2168,6 +2373,13 @@ export default defineComponent({
         // 托盘契约用字符串枚举的循环模式（与持久化的 player.loopMode 一致）
         loopMode: PLAY_LOOP_MODES[this.currentMode] || 'listLoop',
         title,
+        // 托盘菜单是个迷你控制台：进度条与音量跟着实时走
+        position: this.currentTime || 0,
+        duration: this.duration || 0,
+        volume: this.currentVolume,
+        muted: this.isMuted,
+        // 登录态一起带上，防主进程那份和这边不一致
+        isLoggedIn: this.isLoggedIn,
       });
     },
     async initWallpaperState(): Promise<void> {
@@ -2285,6 +2497,17 @@ export default defineComponent({
     this.removeTrayToggleMode = electronApi.onTrayToggleMode(() => {
       this.toggleMode();
     });
+    // 托盘菜单上的进度条 / 音量（菜单是个迷你控制台）
+    this.removeTraySeek = electronApi.onTraySeek((ratio) => {
+      const total = this.duration || 0;
+      if (total > 0) this.changeTime(Math.min(total, Math.max(0, ratio * total)));
+    });
+    this.removeTrayVolume = electronApi.onTrayVolume((volume) => {
+      this.changeVolume(volume);
+    });
+    this.removeTrayToggleMute = electronApi.onTrayToggleMute(() => {
+      this.toggleMute();
+    });
     this.removeTrayShowPlaylist = electronApi.onTrayShowPlaylist(() => {
       // 托盘「设置歌单」-> 直接打开统一的歌单管理弹窗
       this.playlistManagerVisible = true;
@@ -2317,9 +2540,15 @@ export default defineComponent({
     this.removeTrayMenuListener = electronApi.onTrayMenuVisibility((visible) => {
       this.trayMenuOpen = visible;
     });
-    document.addEventListener('mousedown', this.onTrayMenuGuard, true);
-    document.addEventListener('mouseup', this.onTrayMenuGuard, true);
-    document.addEventListener('click', this.onTrayMenuGuard, true);
+    /**
+     * 这里原来有三个捕获阶段的监听，用来在托盘菜单打开时吞掉窗口内的点击 ——
+     * 那是为了挡住「壁纸模式的鼠标转发把点菜单这一下同时合成到壁纸窗口」的副作用。
+     * 现在壁纸模式已经 `forwardMouseInput: false`（界面也全隐藏了），不会再有合成点击，
+     * 所以按计划注释掉。`trayMenuOpen` 本身还留着：菜单开着时要把进度推给菜单里的进度条。
+     */
+    // document.addEventListener('mousedown', this.onTrayMenuGuard, true);
+    // document.addEventListener('mouseup', this.onTrayMenuGuard, true);
+    // document.addEventListener('click', this.onTrayMenuGuard, true);
     document.addEventListener('keydown', this.handleKeydown);
     document.addEventListener('mousemove', this.onDocMouseMove);
     document.addEventListener('mouseup', this.onDocMouseUp);
@@ -2331,9 +2560,10 @@ export default defineComponent({
     this.stopBufferTicker();
     navigator.mediaDevices?.removeEventListener?.('devicechange', this.onAudioDeviceChange);
     // 自绘托盘菜单的守卫与其他监听一起摘掉
-    document.removeEventListener('mousedown', this.onTrayMenuGuard, true);
-    document.removeEventListener('mouseup', this.onTrayMenuGuard, true);
-    document.removeEventListener('click', this.onTrayMenuGuard, true);
+    // （守卫本身已经注释掉，这里同样注释，留着对照）
+    // document.removeEventListener('mousedown', this.onTrayMenuGuard, true);
+    // document.removeEventListener('mouseup', this.onTrayMenuGuard, true);
+    // document.removeEventListener('click', this.onTrayMenuGuard, true);
     if (this.removeTrayMenuListener) this.removeTrayMenuListener();
     // 预热的隐藏流 / 元素也要收掉
     this.clearAllWarm();
@@ -2358,6 +2588,9 @@ export default defineComponent({
     if (this.removeTrayPrev) this.removeTrayPrev();
     if (this.removeTrayNext) this.removeTrayNext();
     if (this.removeTrayToggleMode) this.removeTrayToggleMode();
+    if (this.removeTraySeek) this.removeTraySeek();
+    if (this.removeTrayVolume) this.removeTrayVolume();
+    if (this.removeTrayToggleMute) this.removeTrayToggleMute();
     if (this.removeTrayShowPlaylist) this.removeTrayShowPlaylist();
     if (this.removeTrayShowLogoutConfirm) this.removeTrayShowLogoutConfirm();
     if (this.removeWallpaperState) this.removeWallpaperState();
@@ -2597,6 +2830,16 @@ html[data-tint='dark'] {
   z-index: 200;
   display: flex;
   align-items: center;
+}
+/*
+ * 壁纸模式：标题栏与控制栏整体隐藏
+ *
+ * 壁纸模式下窗口就是桌面背景，鼠标输入也不再转发（attach 里 forwardMouseInput: false），
+ * 界面上的按钮点不到，留着只会挡画面 —— 全部操作走托盘菜单。
+ * 用 !important 压掉组件自己的 `position: fixed` / opacity 之类。
+ */
+.wm-hidden {
+  display: none !important;
 }
 .titlebar-drag {
   flex: 1;

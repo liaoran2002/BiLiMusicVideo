@@ -43,8 +43,8 @@ export interface IpcContext {
   updateTrayState: (state: TrayState) => void
   /** 自绘托盘菜单：当前状态 */
   getTrayMenuState: () => TrayMenuState
-  /** 自绘托盘菜单：执行动作（内部会先收起菜单） */
-  runTrayMenuAction: (action: TrayMenuAction) => void
+  /** 自绘托盘菜单：执行动作（内部会先收起菜单）；value 用于进度/音量 */
+  runTrayMenuAction: (action: TrayMenuAction, value?: number) => void
   /** 自绘托盘菜单：页面回报高度后定位并显示 */
   sizeTrayMenu: (height: number) => void
   /** 自绘托盘菜单：收起 */

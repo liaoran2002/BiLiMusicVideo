@@ -84,6 +84,28 @@
         </div>
       </div>
     </div>
+    <!-- 进度条放在按钮**上方**（用户要求） -->
+    <div class="progressContainer">
+      <div class="time" id="currentTime">
+        {{ formatTime(isVideoDragging ? draggingTime : currentTime) }}
+      </div>
+      <div
+        class="progressWrapper"
+        id="progressContainer"
+        @pointerdown.prevent="onProgressDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerUp"
+      >
+        <div
+          class="progressBar"
+          :style="{ width: progress * 100 + '%' }"
+          id="progressBar"
+        >
+          <div class="progressHandle" id="progressHandle"></div>
+        </div>
+      </div>
+      <div class="time" id="totalTime">{{ formatTime(duration) }}</div>
+    </div>
     <div id="controls">
       <!-- 歌曲列表（播放队列）；打开时变成叉号 -->
       <i
@@ -173,27 +195,6 @@
         @click="$emit('videoControl', 'playMode')"
         id="playMode"
       ></i>
-    </div>
-    <div class="progressContainer">
-      <div class="time" id="currentTime">
-        {{ formatTime(isVideoDragging ? draggingTime : currentTime) }}
-      </div>
-      <div
-        class="progressWrapper"
-        id="progressContainer"
-        @pointerdown.prevent="onProgressDown"
-        @pointermove="onPointerMove"
-        @pointerup="onPointerUp"
-      >
-        <div
-          class="progressBar"
-          :style="{ width: progress * 100 + '%' }"
-          id="progressBar"
-        >
-          <div class="progressHandle" id="progressHandle"></div>
-        </div>
-      </div>
-      <div class="time" id="totalTime">{{ formatTime(duration) }}</div>
     </div>
   </div>
 </template>
@@ -546,7 +547,8 @@ export default defineComponent({
   align-items: center;
   gap: 5px;
   height: 5px;
-  margin-top: 15px;
+  /* 现在是「标题 → 进度条 → 按钮」的顺序，所以上下都要留白 */
+  margin: 15px 0;
   position: relative;
 }
 .progressWrapper {

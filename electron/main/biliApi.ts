@@ -149,13 +149,23 @@ export const clearNavData = (): void => {
  * 判断「缓存里的播放地址还能不能用」之前必须过这一道：
  * 登录窗口刚登录完时 nav 缓存还是「未登录」，用旧状态判断会把
  * 「该重新解析成更高清晰度」误判成「缓存可用」。
+ *
+ * 返回值三种情况，**别把它当纯 boolean 用**：
+ *  - `true`  / `false`：nav 明确给的结论；
+ *  - `null`：这次没问到（网络抖动 / 风控 / 超时）—— 结论未知。
+ *
+ * 为什么要区分 `null`：以前这里返回 `loginState === true`，也就是「没问到 = 未登录」。
+ * 启动时第一次解析如果正好赶上 nav 没问到，就会把 `loginState: false` 写进缓存，
+ * 之后每次解析都判定「缓存是未登录时取的，现已登录」→ 无谓地重新解析一遍
+ * （用户看到的就是「我明明没退出登录，怎么老在重新解析」）。
  */
-export const ensureLoginState = async (): Promise<boolean> => {
+export const ensureLoginState = async (): Promise<boolean | null> => {
   if (loginState !== null && Date.now() - navFetchedAt < NAV_TTL_MS) {
     return loginState
   }
   await refreshNavData()
-  return loginState === true
+  // refreshNavData 失败时不会改 loginState，这里原样返回（可能是 null = 未知）
+  return loginState
 }
 
 const clearMixinKey = (): void => {
@@ -168,11 +178,23 @@ const getMixinKeyCached = async (): Promise<string | null> => {
   return refreshNavData()
 }
 
+/**
+ * 取当前用户信息
+ *
+ * 失败分两种情况，**必须让调用方区分**（踩坑）：
+ *  - nav 明确回了 `isLogin: false` → 真的没登录（`未登录`）；
+ *  - nav 请求本身失败（网络抖动 / 风控 / 超时）→ 结论未知（`NAV_FAILED`）。
+ *
+ * 以前两种情况都抛「未登录」，渲染层就一律把界面切成未登录：托盘菜单显示「登录」、
+ * 解析视频时按未登录档位取流并写进缓存，于是每次都要「重新解析」，
+ * 明明登录着却像掉线一样。
+ */
 export const getUserInfo = async (): Promise<UserInfo> => {
   if (cachedUserInfo) return cachedUserInfo
   await refreshNavData()
-  if (!cachedUserInfo) throw new Error('未登录')
-  return cachedUserInfo
+  if (cachedUserInfo) return cachedUserInfo
+  if (loginState === false) throw new Error('未登录')
+  throw new Error('NAV_FAILED')
 }
 
 const encWbi = (params: QueryParams, mixinKey: string): string => {
@@ -619,6 +641,68 @@ const firstDurl = (res: BiliResponse | null): string | null => {
   const durl = (res?.data as { durl?: Array<{ url?: string }> } | undefined)?.durl
   const url = durl?.[0]?.url
   return typeof url === 'string' && url ? url : null
+}
+
+/**
+ * 从一段文本里抠出 BV 号
+ *
+ * 用户可能直接粘 BV 号，也可能粘整段分享文案（含标题、短链、?p=2 之类），
+ * 所以先找 BV 号；找不到再把文本当链接去跟随跳转（b23.tv 短链）。
+ */
+const BV_PATTERN = /BV[0-9A-Za-z]{10}/
+
+/**
+ * 跟随短链拿到最终 URL（b23.tv -> www.bilibili.com/video/BVxxx）
+ *
+ * `net.fetch` 默认跟 302，这里只关心最终地址里的 BV 号，所以拿到 response.url 就够，
+ * 不必读 body（省流量，也避免大页面解析）。
+ */
+const followShortLink = async (input: string): Promise<string | null> => {
+  const url = input.match(/https?:\/\/\S+/)?.[0]
+  if (!url) return null
+  try {
+    const res = await net.fetch(url, {
+      headers: { Referer: 'https://www.bilibili.com/', 'User-Agent': USER_AGENT },
+    })
+    return res.url || null
+  } catch {
+    return null
+  }
+}
+
+/** 解析出来的一条视频信息（「添加视频」弹窗预览用；类型定义在 common/types/ipc） */
+import type { ParsedVideoInfo } from '@common/types/ipc'
+export type { ParsedVideoInfo }
+
+/**
+ * 解析用户输入的「B 站视频链接 / BV 号」，取回标题、封面、UP 主
+ *
+ * 只在「添加视频」里用：先尽量从文本里抠 BV 号，抠不到就跟随短链，
+ * 再拿 view 接口把展示需要的信息取齐。
+ */
+export const parseVideoInput = async (input: string): Promise<ParsedVideoInfo> => {
+  const text = String(input ?? '').trim()
+  if (!text) throw new Error('请先粘贴视频链接或 BV 号')
+
+  let bvid = text.match(BV_PATTERN)?.[0] ?? ''
+  if (!bvid) {
+    const finalUrl = await followShortLink(text)
+    bvid = finalUrl?.match(BV_PATTERN)?.[0] ?? ''
+  }
+  if (!bvid) throw new Error('没有识别出 BV 号，请粘贴 B 站视频链接或 BV 号')
+
+  const view = await biliGet(`${VIEW_API}?bvid=${bvid}`)
+  if (view.code !== 0) throw new Error(view.message ?? '获取视频信息失败')
+  const data = view.data as
+    | { title?: string; pic?: string; owner?: { name?: string }; duration?: number }
+    | undefined
+  return {
+    bvid,
+    title: typeof data?.title === 'string' ? data.title : '',
+    pic: typeof data?.pic === 'string' ? data.pic : null,
+    author: typeof data?.owner?.name === 'string' ? data.owner.name : null,
+    duration: typeof data?.duration === 'number' ? data.duration : null,
+  }
 }
 
 export async function resolveVideoUrl(

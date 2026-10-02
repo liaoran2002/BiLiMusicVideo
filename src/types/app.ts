@@ -42,8 +42,8 @@ export interface BiliVideo {
   pic?: string | null
   /** UP 主 */
   author?: string | null
-  /** 时长（秒） */
-  duration?: number | null
+  /** 时长：搜索接口给字符串 "4:03"，view 接口给秒数，两种都可能是 */
+  duration?: number | string | null
   /** 后端缓存里可能带上这两个字段 */
   view_result?: unknown
   playurl_result?: unknown
@@ -141,6 +141,10 @@ export interface AppData {
   removeTrayShowPlaylist: RemoveListener | null
   removeTrayShowLogoutConfirm: RemoveListener | null
   removeWallpaperState: RemoveListener | null
+  /** 托盘菜单（迷你控制台）：进度条 / 音量 / 静音 */
+  removeTraySeek: RemoveListener | null
+  removeTrayVolume: RemoveListener | null
+  removeTrayToggleMute: RemoveListener | null
   /** 自绘托盘菜单：菜单开着时吞掉窗口内点击 */
   removeTrayMenuListener: RemoveListener | null
   trayMenuOpen: boolean
@@ -153,6 +157,8 @@ export interface AppData {
   settingsVisible: boolean
   /** 关于弹窗是否可见 */
   aboutVisible: boolean
+  /** 「添加视频」弹窗是否可见（视频列表右上角的加号） */
+  addVideoVisible: boolean
   /** 视频请求竞态令牌（切视频时防乱序覆盖） */
   _videoToken: number
   /** 同一个视频的连续失败次数，达到上限就跳过该曲，避免无限重试 */
@@ -175,6 +181,8 @@ export interface AppData {
   _lastMediaPosAt: number
   /** 上次发给任务栏的进度指纹（百分比 + 暂停态） */
   _lastTaskbarKey: string
+  /** 上次给托盘菜单推状态的时间（菜单开着时 300ms 节流） */
+  _lastTraySyncAt: number
   /** 定时自动同步的定时器 */
   _syncTimer: ReturnType<typeof setInterval> | null
   /** 定时器对应的「策略指纹」（有没有定时歌单 + 最小间隔），用来避免无关的配置广播反复重建定时器 */

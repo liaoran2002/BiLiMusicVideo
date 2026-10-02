@@ -8,6 +8,7 @@
  *   4. registerIpcHandlers()
  *   5. createMainWindow() / createTray()
  */
+
 import {
   app,
   BrowserWindow,
@@ -56,6 +57,12 @@ let wallpaperEnabled = false
 let isQuitting = false
 /** 托盘悬浮提示里显示的「当前在播什么」（由渲染层同步） */
 let trayTitle = ''
+/** 托盘菜单进度条要用的播放位置 / 时长（秒） */
+let trayPosition = 0
+let trayDuration = 0
+/** 托盘菜单音量按钮要用的音量与静音状态 */
+let trayVolume = 70
+let trayMuted = false
 /** 上一次设过的 tooltip 文本，避免重复设置 */
 let lastTrayTip = ''
 /**
@@ -444,16 +451,25 @@ async function applyWallpaperMode(enabled: boolean): Promise<void> {
     try {
       asWallpaper?.attach(mainWindow, {
         transparent: true,
-        forwardMouseInput: true,
+        /**
+         * 壁纸模式**不转发鼠标**
+         *
+         * 界面上的标题栏和控制栏在壁纸模式下是隐藏的（`.wm-hidden`），窗口里没有可点的东西，
+         * 所以不需要把全系统的鼠标事件合成进壁纸窗口。
+         *
+         * 而且这个转发本身就是一堆麻烦的源头：它会在 `RIDEV_INPUTSINK` 里把**每一次**
+         * 鼠标按下都 `PostMessage` 给壁纸窗口，Chromium 随即在那里 `SetCapture`，
+         * 于是别的窗口（托盘菜单、原生弹出菜单）的点击会被抢走一半。
+         * 关掉之后壁纸模式下点击/拖拽都交还给系统，桌面该怎么用还怎么用。
+         */
+        forwardMouseInput: false,
         forwardKeyboardInput: false,
       })
     } catch (err) {
       console.error('[wallpaper] attach 失败:', err)
     }
 
-    // 4) 托盘**不销毁**，只切到「壁纸模式用法」
-    //    原生弹出菜单在壁纸模式下用不了（原因见 applyTrayMode 的注释），
-    //    但托盘的 click 事件本身是好的，所以壁纸模式改成「单击 = 播放/暂停」。
+    // 4) 刷新托盘提示（壁纸模式下操作都在托盘菜单里）
     applyTrayMode()
   } else {
     // 退出壁纸模式：先脱离壁纸层，再恢复窗口状态
@@ -708,6 +724,8 @@ let trayMenuHeight = 0
 let trayMenuShown = false
 /** 失焦后延迟判断收起的定时器 */
 let blurHideTimer: ReturnType<typeof setTimeout> | null = null
+/** 弹出菜单的兜底显示定时器（见 showTrayMenu） */
+let trayMenuFallbackTimer: ReturnType<typeof setTimeout> | null = null
 const TRAY_MENU_WIDTH = 208
 
 const trayMenuUrl = (): string =>
@@ -779,18 +797,21 @@ function showTrayMenu(): void {
   trayMenuShown = false
   if (!trayMenuWindow || trayMenuWindow.isDestroyed()) {
     trayMenuWindow = createTrayMenuWindow()
-    trayMenuWindow.webContents.once('did-finish-load', () => {
-      pushTrayMenuState()
-      // 页面还没回报高度时先用上次的高度兜底，别让菜单迟迟不出现
-      setTimeout(() => {
-        if (!trayMenuShown && trayMenuWindow && !trayMenuWindow.isDestroyed()) {
-          placeAndShowTrayMenu(trayMenuHeight || 300)
-        }
-      }, 400)
-    })
-    return
   }
   pushTrayMenuState()
+  /**
+   * 兜底显示（**每次**弹出都要装，不能只装在创建时）
+   *
+   * 页面那边「高度没变就不回报」，所以显示这件事**不能**绑在 `trayMenu:ready` 上：
+   * 只装一次的话，第一次右键能弹（高度从 0 变成 N），第二次开始高度没变、页面不回报，
+   * 菜单就再也不出现了 —— 这正是「进了壁纸模式后右键弹不出来」的原因。
+   * 现在每次都用上次的高度先弹出来；高度真变了页面会回报，`sizeTrayMenu` 再重新定位。
+   */
+  if (trayMenuFallbackTimer) clearTimeout(trayMenuFallbackTimer)
+  trayMenuFallbackTimer = setTimeout(() => {
+    trayMenuFallbackTimer = null
+    if (!trayMenuShown) placeAndShowTrayMenu(trayMenuHeight || 300)
+  }, 120)
 }
 
 /** 把最新状态推给菜单窗口 */
@@ -809,6 +830,10 @@ function getTrayMenuState(): TrayMenuState {
     // 被「关闭到托盘」藏起来了：菜单那一项要显示「恢复窗口」
     windowHidden: !!mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible(),
     title: (trayTitle || '').replace(/<[^>]*>/g, '').trim(),
+    position: trayPosition,
+    duration: trayDuration,
+    volume: trayVolume,
+    muted: trayMuted,
   }
 }
 
@@ -884,9 +909,23 @@ function scheduleHideAfterBlur(): void {
   }, 400)
 }
 
-/** 执行菜单动作：先收起菜单，再复用应用里已有的那套事件 */
-function runTrayMenuAction(action: TrayMenuAction): void {
-  hideTrayMenu()
+/**
+ * 执行菜单动作：先收起菜单，再复用应用里已有的那套事件
+ *
+ * 进度条 / 音量这两个带参数，所以接 `value`。
+ */
+function runTrayMenuAction(action: TrayMenuAction, value?: number): void {
+  // 菜单动作都记一行：出问题时能一眼看出「点了什么、有没有传参」
+  console.log(`[tray] 菜单动作: ${action}${value === undefined ? '' : ' ' + value}`)
+  /**
+   * 音量与静音**不收起菜单**
+   *
+   * 这两个是连续操作：调音量时菜单一关，用户看不到音量数字、也没法接着调，
+   * 之前的现象就是「鼠标一碰音量条菜单就没了」。
+   */
+  if (action !== 'volume' && action !== 'toggleMute') {
+    hideTrayMenu()
+  }
   switch (action) {
     case 'playControl':
       sendToMain('tray:playControl')
@@ -900,9 +939,23 @@ function runTrayMenuAction(action: TrayMenuAction): void {
     case 'toggleMode':
       sendToMain('tray:toggleMode')
       break
+    case 'seek':
+      if (typeof value === 'number') sendToMain('tray:seek', value)
+      break
+    case 'volume':
+      if (typeof value === 'number') sendToMain('tray:volume', value)
+      break
+    case 'toggleMute':
+      sendToMain('tray:toggleMute')
+      break
     case 'showPlaylist':
-      focusMainWindow()
-      sendToMain('tray:showPlaylist')
+      /**
+       * 设置歌单：壁纸模式下**先退出壁纸模式**再打开（用户要求）
+       *
+       * 壁纸模式下窗口在桌面层、标题栏控制栏又都是隐藏的，直接弹歌单管理会看不见，
+       * 所以先把窗口恢复出来，再让渲染层打开弹窗。
+       */
+      void restoreWindow().then(() => sendToMain('tray:showPlaylist'))
       break
     case 'toggleWallpaper':
       void toggleWallpaper()
@@ -914,8 +967,7 @@ function runTrayMenuAction(action: TrayMenuAction): void {
       createLoginWindow()
       break
     case 'logout':
-      focusMainWindow()
-      sendToMain('tray:showLogoutConfirm')
+      void restoreWindow().then(() => sendToMain('tray:showLogoutConfirm'))
       break
     case 'quit':
       app.quit()
@@ -939,14 +991,6 @@ async function restoreWindow(): Promise<void> {
   }
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
-}
-
-/** 把主窗口叫到前台（壁纸模式下它挂在桌面层，show/focus 只是尽量） */
-function focusMainWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (wallpaperEnabled) return
   mainWindow.show()
   mainWindow.focus()
 }
@@ -1105,10 +1149,21 @@ void app.whenReady().then(async () => {
       }
       // 悬浮提示里带上当前歌曲：壁纸模式下原生菜单用不了，tooltip 是唯一的托盘反馈
       if (state.title !== undefined) trayTitle = state.title
+      // 托盘菜单是个迷你控制台：进度条与音量按钮都要跟着实时走
+      if (state.position !== undefined) trayPosition = state.position
+      if (state.duration !== undefined) trayDuration = state.duration
+      if (state.volume !== undefined) trayVolume = state.volume
+      if (state.muted !== undefined) trayMuted = state.muted
+      // 登录态也一起收下（防漂移：托盘菜单那一项要显示「退出登录」还是「登录」）
+      if (state.isLoggedIn !== undefined && state.isLoggedIn !== isLoggedIn) {
+        isLoggedIn = state.isLoggedIn
+      }
       refreshTray()
+      // 菜单开着就把新状态推过去（进度条才会动）
+      if (trayMenuShown) pushTrayMenuState()
     },
     getTrayMenuState: () => getTrayMenuState(),
-    runTrayMenuAction: (action) => runTrayMenuAction(action),
+    runTrayMenuAction: (action, value) => runTrayMenuAction(action, value),
     sizeTrayMenu: (height) => sizeTrayMenu(height),
     hideTrayMenu: () => hideTrayMenu(),
     setProgress: (progress, paused) => {

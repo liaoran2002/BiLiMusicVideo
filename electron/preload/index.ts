@@ -18,6 +18,7 @@ import type {
   AppSetting,
   DragOffset,
   IpcChannelMap,
+  ParsedVideoInfo,
   RemoveListener,
   TrayMenuAction,
   TrayMenuState,
@@ -61,6 +62,11 @@ const api = {
   onTrayPrev: (cb: () => void): RemoveListener => rendererOn('tray:prev', cb),
   onTrayNext: (cb: () => void): RemoveListener => rendererOn('tray:next', cb),
   onTrayToggleMode: (cb: () => void): RemoveListener => rendererOn('tray:toggleMode', cb),
+  /** 托盘菜单进度条：payload 是 0~1 的比例 */
+  onTraySeek: (cb: (ratio: number) => void): RemoveListener => rendererOn('tray:seek', cb),
+  /** 托盘菜单音量：payload 是 0~100 */
+  onTrayVolume: (cb: (volume: number) => void): RemoveListener => rendererOn('tray:volume', cb),
+  onTrayToggleMute: (cb: () => void): RemoveListener => rendererOn('tray:toggleMute', cb),
   onTrayShowPlaylist: (cb: () => void): RemoveListener => rendererOn('tray:showPlaylist', cb),
   onTrayShowLogoutConfirm: (cb: () => void): RemoveListener =>
     rendererOn('tray:showLogoutConfirm', cb),
@@ -68,8 +74,8 @@ const api = {
 
   // #region 自绘托盘菜单
   trayMenuGetState: (): Promise<TrayMenuState> => rendererInvoke('trayMenu:getState'),
-  trayMenuAction: (action: TrayMenuAction): Promise<void> =>
-    rendererInvoke('trayMenu:action', action),
+  trayMenuAction: (action: TrayMenuAction, value?: number): Promise<void> =>
+    rendererInvoke('trayMenu:action', { action, value }),
   trayMenuReady: (height: number): Promise<void> => rendererInvoke('trayMenu:ready', { height }),
   trayMenuClose: (): Promise<void> => rendererInvoke('trayMenu:close'),
   onTrayMenuState: (cb: (state: TrayMenuState) => void): RemoveListener =>
@@ -85,8 +91,11 @@ const api = {
 
   // #region B 站接口
   getUserInfo: (): Promise<UserInfo> => rendererInvoke('api:getUserInfo'),
-  searchSong: (keyword: string): Promise<{ data: unknown }> =>
-    rendererInvoke('api:searchSong', { keyword }),
+  searchSong: (keyword: string, skipCache = false): Promise<{ data: unknown }> =>
+    rendererInvoke('api:searchSong', { keyword, skipCache }),
+  /** 「添加视频」：解析 B 站链接 / BV 号 */
+  parseVideo: (input: string): Promise<ParsedVideoInfo> =>
+    rendererInvoke('api:parseVideo', { input }),
   resolveVideoUrl: (
     bvid: string,
     keyword?: string,

@@ -15,8 +15,35 @@
   >
     <template #header>
       <div class="listTitle">
-        <span class="lt-name">{{ title }}</span>
-        <span class="lt-count">{{ list.length }} 项</span>
+        <!-- 左：刷新（两种列表共用一个按钮，动作不同）
+             歌曲列表 -> 重新同步歌单；视频列表 -> 重新搜索这首歌
+             点击时图标转 360°、0.5s，作为「点到了」的反馈 -->
+        <div class="lt-side">
+          <button
+            class="lt-icon lt-refresh"
+            :class="{ spin: spinning }"
+            :title="isSongList ? '重新同步歌单' : '重新搜索这首歌'"
+            @click="onRefresh"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13.2 6.2A5.4 5.4 0 1 0 13.4 9.2" />
+              <path d="M13.4 2.8v3.5h-3.5" />
+            </svg>
+          </button>
+        </div>
+        <!-- 中：标题 + 项数 -->
+        <div class="lt-center">
+          <span class="lt-name">{{ title }}</span>
+          <span class="lt-count">{{ list.length }} 项</span>
+        </div>
+        <!-- 右：加号（只有视频列表有，打开「添加视频」） -->
+        <div class="lt-side lt-end">
+          <button v-if="!isSongList" class="lt-icon" title="添加视频" @click="$emit('addVideo')">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M8 3.2v9.6M3.2 8h9.6" />
+            </svg>
+          </button>
+        </div>
       </div>
     </template>
 
@@ -69,6 +96,30 @@
 
           <!-- 时长 -->
           <div v-if="durationOf(item)" class="duration">{{ durationOf(item) }}</div>
+
+          <!--
+            收藏（空心爱心 / 实心爱心）：只在视频列表里出现
+            点了立刻变实心，收藏项在重新搜索后会固定排在最前面
+          -->
+          <div
+            v-if="!isSongList"
+            class="fav"
+            :class="{ on: isFav(item) }"
+            :title="isFav(item) ? '取消收藏' : '收藏'"
+            @click.stop="$emit('toggleFavorite', bvidOf(item))"
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              :fill="isFav(item) ? 'currentColor' : 'none'"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linejoin="round"
+            >
+              <path d="M8 13.1S2.3 9.7 2.3 6.2c0-1.7 1.3-3 3-3 1.2 0 2.2.7 2.7 1.7.5-1 1.5-1.7 2.7-1.7 1.7 0 3 1.3 3 3 0 3.5-5.7 6.9-5.7 6.9z" />
+            </svg>
+          </div>
         </li>
       </ul>
     </div>
@@ -92,8 +143,8 @@ export interface VideoListItem {
   pic?: string | null;
   /** UP 主名 */
   author?: string | null;
-  /** 时长（秒） */
-  duration?: number | null;
+  /** 时长（秒）；B 站搜索接口给的是 "4:03" 这种字符串，所以两种都收 */
+  duration?: number | string | null;
 }
 
 type ListItem = PlaylistSong | VideoListItem;
@@ -108,6 +159,26 @@ const formatSeconds = (sec: number | null | undefined): string | null => {
   const s = Math.floor(sec % 60);
   const p = (n: number): string => (n < 10 ? `0${n}` : String(n));
   return `${p(m)}:${p(s)}`;
+};
+
+/**
+ * 时长文案（两种数据形状都要认）
+ *
+ * 踩过：B 站**搜索**接口给的 `duration` 是 `"4:03"` 这种**字符串**，
+ * 而 **view** 接口给的是秒数。原来只处理数字，于是「刷新」走真实重搜之后
+ * （搜索结果覆盖了缓存里的旧数据），视频列表的时长整列消失。
+ * 这里两种都接受：已经是 `mm:ss` 就直接用，是数字（或数字字符串）再格式化。
+ */
+const durationText = (raw: number | string | null | undefined): string => {
+  if (typeof raw === 'number') return formatSeconds(raw) ?? '';
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return '';
+    if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(s)) return s;
+    const n = Number(s);
+    if (Number.isFinite(n)) return formatSeconds(n) ?? '';
+  }
+  return '';
 };
 
 /** 把文本里的 HTML 特殊字符全部转义，杜绝注入 */
@@ -145,9 +216,22 @@ const sanitizeTitleHtml = (raw: string): string => {
 
 export default defineComponent({
   name: 'showList',
-  emits: ['showList', 'changeSong', 'changeVideo'],
+  emits: [
+    'showList',
+    'changeSong',
+    'changeVideo',
+    /** 左上角刷新：歌单列表=重新同步，视频列表=重新搜索 */
+    'refresh',
+    /** 右上角加号：打开「添加视频」 */
+    'addVideo',
+    /** 爱心：收藏 / 取消收藏某个视频 */
+    'toggleFavorite',
+  ],
   data() {
     return {
+      /** 刷新图标正在转圈（0.5s） */
+      spinning: false,
+      _spinTimer: null as ReturnType<typeof setTimeout> | null,
       itemRefs: {} as Record<number, HTMLElement>,
       /**
        * 加载失败的封面地址集合
@@ -179,6 +263,11 @@ export default defineComponent({
     currentIndex: {
       type: Number,
       default: 0,
+    },
+    /** 当前这首歌收藏的 bvid 列表（视频列表里显示实心爱心） */
+    favorites: {
+      type: Array as () => string[],
+      default: () => [],
     },
   },
   computed: {
@@ -230,8 +319,8 @@ export default defineComponent({
       return normalizeImageUrl(item.cover);
     },
     durationOf(item: ListItem): string {
-      if (isVideoItem(item)) return formatSeconds(item.duration) ?? '';
-      return item.duration ?? '';
+      if (isVideoItem(item)) return durationText(item.duration);
+      return durationText(item.duration);
     },
     /** 图片挂了就记下这个地址，露出兜底图标（避免一直显示破图） */
     onCoverError(e: Event) {
@@ -241,6 +330,33 @@ export default defineComponent({
       // 兜底：长期浏览视频列表会让这张表慢慢变大，超了就整体清掉重来
       if (Object.keys(this.failedCovers).length > 2000) this.failedCovers = {};
       this.failedCovers[src] = true;
+    },
+    /** 视频项的 bvid（歌单项返回空串，模板里就不用写类型断言了） */
+    bvidOf(item: ListItem): string {
+      return isVideoItem(item) ? item.bvid : '';
+    },
+    /** 这一项是不是已收藏 */
+    isFav(item: ListItem): boolean {
+      const bvid = this.bvidOf(item);
+      return !!bvid && this.favorites.includes(bvid);
+    },
+    /**
+     * 左上角刷新
+     *
+     * 先复位再激活，保证连点也能重新播放转圈动画（CSS 动画靠类名重加才会重播）。
+     * 真正干什么由父组件按列表类型决定。
+     */
+    onRefresh(): void {
+      this.spinning = false;
+      void this.$nextTick(() => {
+        this.spinning = true;
+        if (this._spinTimer) clearTimeout(this._spinTimer);
+        this._spinTimer = setTimeout(() => {
+          this.spinning = false;
+          this._spinTimer = null;
+        }, 500);
+      });
+      this.$emit('refresh');
     },
     onItemClick(item: ListItem, index: number) {
       if (this.isSongList) this.$emit('changeSong', index);
@@ -267,10 +383,85 @@ export default defineComponent({
  */
 .listTitle {
   color: inherit;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  /*
+   * 三列：左（刷新）/ 中（标题）/ 右（加号）。
+   * 注意左右各自包了一层 `.lt-side`：直接放 4 个元素的话，第四个会被挤到第二行、
+   * 也就是跑到左边去（加号「跑到左上角」就是这么来的）。
+   */
+  padding: 0 2px;
+}
+.lt-side {
+  display: flex;
+  align-items: center;
+  /* 右列靠右：宽度相同才不会把中间标题挤偏 */
+  min-width: 26px;
+}
+.lt-end {
+  justify-content: flex-end;
+}
+.lt-center {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  min-width: 0;
+}
+/* 左上角刷新 / 右上角加号：同一种图标按钮 */
+.lt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background 0.15s, opacity 0.15s;
+}
+.lt-icon:hover {
+  background: var(--panel-hover);
+  opacity: 1;
+}
+/* 点一下转 360°、0.5s */
+.lt-icon.spin svg {
+  animation: lt-spin 0.5s ease;
+}
+@keyframes lt-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 收藏爱心：空心 -> 实心 */
+.fav {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  opacity: 0.55;
+  color: var(--panel-text);
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.fav:hover {
+  background: var(--panel-hover);
+  opacity: 1;
+}
+.fav.on {
+  opacity: 1;
+  color: var(--accent-danger);
 }
 .lt-name {
   font-weight: 600;

@@ -96,13 +96,20 @@ export const registerApiHandlers = (context: ApiContext): void => {
 
   mainHandle('api:getUserInfo', () => biliApi.getUserInfo())
 
-  mainHandle('api:searchSong', async ({ keyword }) => {
+  mainHandle('api:searchSong', async ({ keyword, skipCache }) => {
     if (!keyword || !keyword.trim()) {
       throw new Error('关键词不能为空')
     }
 
+    /**
+     * `skipCache`（视频列表的刷新按钮）会真的重新搜一次。
+     *
+     * 重新搜到的结果**不带** view/playurl 数据，直接写回会把缓存里已解析好的
+     * dash 地址全冲掉（下次每首都要重解析），所以这里与旧条目做一次合并：
+     * 同一个 bvid 保留旧的 view_result / playurl_result。
+     */
     const cached = cacheEnabled() ? await cacheManager.get<SearchPayload>(keyword) : null
-    if (cached && cached.data) {
+    if (cached && cached.data && !skipCache) {
       // 缓存里存的是上一次的完整返回体，这里还原成调用方期望的 { data }
       const payload = cached.data as unknown as SearchPayload
       return { data: payload.data ?? cached.data }
@@ -119,9 +126,34 @@ export const registerApiHandlers = (context: ApiContext): void => {
         (item) => (item as { type?: string }).type === 'video',
       )
     }
-    if (cacheEnabled()) await cacheManager.save(keyword, result)
+    if (cacheEnabled()) {
+      const oldItems = (cached?.data as unknown as SearchPayload | undefined)?.data?.result
+      const oldByBvid = new Map<string, CachedSearchItem>()
+      if (Array.isArray(oldItems)) {
+        for (const item of oldItems) {
+          if (item?.bvid) oldByBvid.set(item.bvid, item)
+        }
+      }
+      if (oldByBvid.size > 0 && Array.isArray(result.data?.result)) {
+        result.data.result = (result.data.result as CachedSearchItem[]).map((item) => {
+          const old = item?.bvid ? oldByBvid.get(item.bvid) : undefined
+          if (!old) return item
+          // 旧数据打底、新搜索结果覆盖标题/封面等展示字段，但保留解析结果
+          return {
+            ...old,
+            ...item,
+            view_result: old.view_result,
+            playurl_result: old.playurl_result,
+          }
+        })
+      }
+      await cacheManager.save(keyword, result)
+    }
     return { data: result.data ?? [] }
   })
+
+  /** 「添加视频」：把用户粘贴的链接 / BV 号解析成可预览的信息 */
+  mainHandle('api:parseVideo', async ({ input }) => biliApi.parseVideoInput(input))
 
   mainHandle('api:resolveVideo', async ({ bvid, keyword, skipCache, noDash, qn, audioId }) => {
     try {
@@ -131,6 +163,9 @@ export const registerApiHandlers = (context: ApiContext): void => {
        * 不能直接读缓存的登录标志：登录窗口刚登录完时那份 nav 数据还是「未登录」，
        * 用它判断会把「该重新解析成更高清晰度」误判成「缓存可用」，
        * 于是登录后播放清晰度不变、必须重启才生效。
+       *
+       * 注意它可能是 `null`（这次没问到）：那就**不能**据它下结论，
+       * 见下面 loginChanged 与写缓存那两处。
        */
       const loggedIn = await biliApi.ensureLoginState()
       // 本次要用的清晰度 / 音质：调用方（播放器上手动切换）优先，否则用设置里的默认值
@@ -175,8 +210,15 @@ export const registerApiHandlers = (context: ApiContext): void => {
          * 所以「缓存是未登录时取的 + 现在已登录」必须重取，
          * 否则登录完还得重启才看得到高清。
          */
-        const cachedLoggedIn = targetVideo.playurl_result?.loginState === true
-        const loginChanged = loggedIn && !cachedLoggedIn
+        /**
+         * 缓存条目里记的登录态快照。
+         *
+         * **只有明确是 `false`（当时确实未登录）才值得重取**：
+         * 没有这个字段（老条目 / 当时登录态未知）不该被当成「未登录时取的」，
+         * 否则每次解析都要白重取一遍 —— 这就是「没退出登录却老在重新解析」的来源之一。
+         */
+        const cachedLoginState = targetVideo.playurl_result?.loginState
+        const loginChanged = loggedIn === true && cachedLoginState === false
         /**
          * 关键：以前只判断「缓存里有没有数据」，从不检查播放地址是否过期。
          * B 站直链带签名时效（deadline），实测缓存里 38 条地址有 21 条已过期，
@@ -186,8 +228,10 @@ export const registerApiHandlers = (context: ApiContext): void => {
         const urlUsable =
           isUrlUsable(cachedDurl ?? cachedDash?.videoUrl ?? null) &&
           (!cachedDash || isUrlUsable(cachedDash.audioUrl))
-        // 想要 dash、缓存里却没有，且之前没试过 dash -> 重取一次做升级
-        const needDashUpgrade = !noDash && !cachedDash && !prevDashTried
+        // 想要 dash、缓存里却没有，且之前没试过 dash -> 重取一次做升级。
+        // 必须要求「缓存里确实有播放数据」：否则这条只是该视频的首次解析，
+        // 打日志会变成「每切一首歌就重新解析」的假象（而且文案也不对）。
+        const needDashUpgrade = hasValidData && !noDash && !cachedDash && !prevDashTried
         // 明确要求 durl（dash 播放失败后的兜底）但缓存只有 dash -> 也要重取
         const needDurl = Boolean(noDash) && !cachedDurl
 
@@ -202,7 +246,10 @@ export const registerApiHandlers = (context: ApiContext): void => {
             console.log('[video] 缓存的播放地址已过期，重新解析:', bvid)
           }
           if (needDashUpgrade) {
-            console.log('[video] 缓存只有 720P 的 durl，重新解析以尝试 dash 高清:', bvid)
+            console.log(
+              `[video] 缓存里没有 dash 流（${cachedDurl ? '只有 durl' : '只有旧数据'}），重新解析尝试 dash 高清:`,
+              bvid,
+            )
           }
           // 缓存数据失效 / 地址过期，重新拉取
           const resolved = await biliApi.resolveVideoUrl(bvid, {
@@ -217,7 +264,18 @@ export const registerApiHandlers = (context: ApiContext): void => {
           targetVideo.view_result = viewData
           targetVideo.playurl_result = {
             ...playData,
-            loginState: loggedIn,
+            /**
+             * 记下解析当时的登录态快照。
+             *
+             * `loggedIn` 为 `null`（这次没问到）时**保留上一次的快照**：
+             * 以前无条件写 `!!loggedIn`，一次网络抖动就把条目标成「未登录时取的」，
+             * 于是以后每次解析都判定「未登录时取的，现已登录」→ 白重取一遍。
+             */
+            ...(loggedIn === null
+              ? cachedLoginState === undefined
+                ? {}
+                : { loginState: cachedLoginState }
+              : { loginState: loggedIn }),
             // 记下「这次试过 dash」：试过但没拿到，下次就别反复重取
             dashTried: !noDash || prevDashTried,
           }
@@ -247,7 +305,12 @@ export const registerApiHandlers = (context: ApiContext): void => {
           ...targetVideo,
           bvid,
           view_result: viewData,
-          playurl_result: { ...playData, loginState: loggedIn, dashTried: !noDash },
+          // 登录态未知（null）时干脆不写这个字段：写了 false 就等于「未登录时取的」
+          playurl_result: {
+            ...playData,
+            ...(loggedIn === null ? {} : { loginState: loggedIn }),
+            dashTried: !noDash,
+          },
         }
         if (targetIndex >= 0) results[targetIndex] = targetVideo
         else results.push(targetVideo)

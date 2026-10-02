@@ -12,7 +12,13 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '@/api/electron'
-import type { PlaylistRecord, PlaylistSong, PlaylistStoreData, SyncResult } from '@common/types/playlist'
+import type {
+  FavoriteVideo,
+  PlaylistRecord,
+  PlaylistSong,
+  PlaylistStoreData,
+  SyncResult,
+} from '@common/types/playlist'
 import {
   getSyncInterval,
   isAutoSyncable,
@@ -158,6 +164,52 @@ export const usePlaylistStore = defineStore('playlists', () => {
     return hit ? { bvid: hit.bvid, title: hit.title, cover: hit.cover ?? null } : null
   }
 
+  /**
+   * 某首歌收藏的视频（按收藏时间从新到旧？——不，按插入顺序：最新的在最前面）
+   *
+   * 视频列表里这些条目固定排在最前面，重新搜索也不会丢。
+   */
+  const getFavorites = (songName: string): FavoriteVideo[] =>
+    current.value?.favorites?.[songName] ?? []
+
+  /** 收藏一个视频（同一 bvid 去重，已存在就更新信息并提到最前） */
+  const addFavorite = async (
+    songName: string,
+    video: { bvid: string; title: string; cover?: string | null; author?: string | null; duration?: number | null },
+  ): Promise<void> => {
+    const target = current.value
+    if (!target) return
+    const all = { ...(target.favorites ?? {}) }
+    const list = (all[songName] ?? []).filter((v) => v.bvid !== video.bvid)
+    list.unshift({
+      bvid: video.bvid,
+      title: video.title,
+      cover: video.cover ?? null,
+      author: video.author ?? null,
+      duration: video.duration ?? null,
+      savedAt: Date.now(),
+    })
+    all[songName] = list
+    playlists.value = playlists.value.map((p) =>
+      p.id === target.id ? { ...p, favorites: all, updatedAt: Date.now() } : p,
+    )
+    await persist()
+  }
+
+  /** 取消收藏（顺便记下这个 bvid 是否本来就在收藏里） */
+  const removeFavorite = async (songName: string, bvid: string): Promise<void> => {
+    const target = current.value
+    if (!target?.favorites?.[songName]) return
+    const all = { ...target.favorites }
+    const list = (all[songName] ?? []).filter((v) => v.bvid !== bvid)
+    if (list.length > 0) all[songName] = list
+    else delete all[songName]
+    playlists.value = playlists.value.map((p) =>
+      p.id === target.id ? { ...p, favorites: all, updatedAt: Date.now() } : p,
+    )
+    await persist()
+  }
+
   /** 记录当前歌单播放到第几首 */
   const setLastIndex = async (index: number): Promise<void> => {
     const target = current.value
@@ -243,6 +295,9 @@ export const usePlaylistStore = defineStore('playlists', () => {
     setCurrent,
     setVideoForSong,
     getVideoForSong,
+    getFavorites,
+    addFavorite,
+    removeFavorite,
     setLastIndex,
     sync,
     syncAll,

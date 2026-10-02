@@ -70,18 +70,162 @@
       .item.danger:hover {
         background: rgba(var(--danger), 0.42);
       }
-      .sep {
-        height: 1px;
-        margin: 5px 8px;
-        background: rgba(var(--text-rgb), 0.14);
-      }
       .now {
-        padding: 4px 10px 6px;
+        padding: 2px 10px 6px;
         font-size: 12px;
-        opacity: 0.6;
+        opacity: 0.75;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+      /* —— 进度条 —— */
+      .seek {
+        padding: 0 10px;
+      }
+      .seek-track {
+        position: relative;
+        height: 14px;
+        display: flex;
+        align-items: center;
+        cursor: pointer;
+        touch-action: none;
+      }
+      .seek-track::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(var(--text-rgb), 0.25);
+      }
+      .seek-fill {
+        position: relative;
+        height: 4px;
+        border-radius: 2px;
+        background: rgb(var(--text-rgb));
+      }
+      .seek-thumb {
+        position: absolute;
+        top: 50%;
+        width: 10px;
+        height: 10px;
+        margin-left: -5px;
+        border-radius: 50%;
+        background: rgb(var(--text-rgb));
+        transform: translateY(-50%);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        transition: opacity 0.12s;
+      }
+      .seek:hover .seek-thumb,
+      .seek-track:active .seek-thumb {
+        opacity: 1;
+      }
+      .time {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 3px 10px 4px;
+        font-size: 11px;
+        opacity: 0.6;
+        font-variant-numeric: tabular-nums;
+      }
+      /* 左边已播、右边总长（两端对齐，中间不加 `/`） */
+      .time .t-total {
+        opacity: 0.85;
+      }
+      /* —— 控制按钮那一行 —— */
+      .controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+        padding: 2px 6px 4px;
+      }
+      .controls i {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 30px;
+        font-size: 19px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .controls i:hover {
+        background: rgba(var(--accent), 0.28);
+      }
+      .controls i:active {
+        background: rgba(var(--accent), 0.45);
+      }
+      /* —— 音量：按钮 + 悬停出现的横条 —— */
+      .volume {
+        position: relative;
+        display: inline-flex;
+      }
+      /* 横向弹出条：留在面板内部，不会被窗口边界裁掉；左边是音量数字 */
+      .volume-pop {
+        position: absolute;
+        bottom: 100%;
+        left: -8px;
+        width: 168px;
+        height: 26px;
+        padding: 0 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 8px;
+        background: rgba(var(--glass-rgb), 0.94);
+        border: 1px solid rgba(var(--text-rgb), 0.14);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s;
+      }
+      .volume-num {
+        width: 26px;
+        text-align: right;
+        font-size: 11px;
+        opacity: 0.75;
+        font-variant-numeric: tabular-nums;
+      }
+      .volume:hover .volume-pop {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .volume-track {
+        position: relative;
+        flex: 1;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(var(--text-rgb), 0.25);
+        cursor: pointer;
+        touch-action: none;
+      }
+      .volume-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 100%;
+        border-radius: 2px;
+        background: rgb(var(--text-rgb));
+      }
+      .volume-thumb {
+        position: absolute;
+        top: 50%;
+        width: 10px;
+        height: 10px;
+        margin-left: -5px;
+        border-radius: 50%;
+        background: rgb(var(--text-rgb));
+        transform: translateY(-50%);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+      }
+      /* —— 下面那几项 —— */
+      .list {
+        margin-top: 4px;
+        padding-top: 4px;
+        border-top: 1px solid rgba(var(--text-rgb), 0.14);
       }
     </style>
   </head>
