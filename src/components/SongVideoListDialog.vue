@@ -59,7 +59,7 @@
               </svg>
             </button>
           </template>
-          <button v-else class="lt-icon" title="添加视频" @click="$emit('addVideo')">
+          <button v-else class="lt-icon" title="添加视频" @click="ui.addVideoVisible = true">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
               <path d="M8 3.2v9.6M3.2 8h9.6" />
             </svg>
@@ -127,7 +127,7 @@
             class="fav"
             :class="{ on: isFav(row.item) }"
             :title="isFav(row.item) ? '取消收藏' : '收藏'"
-            @click.stop="$emit('toggleFavorite', bvidOf(row.item))"
+            @click.stop="queue.onToggleFavorite(bvidOf(row.item))"
           >
             <svg
               width="15"
@@ -154,9 +154,14 @@
 <script lang="ts">
 import { defineComponent } from 'vue';
 import type { PlaylistSong } from '@common/types/playlist';
+import type { ListType } from '../types/app';
 import { formatDuration } from '@common/utils/duration';
 import { normalizeImageUrl } from '../utils/image';
 import { sanitizeTitleHtml, stripTags } from '../utils/title';
+import { usePlaybackStore } from '../stores/playback';
+import { useQueueStore } from '../stores/queue';
+import { boot } from '../stores/bootstrap';
+import { useUiStore } from '../stores/ui';
 
 /**
  * 视频列表项（B 站搜索结果）
@@ -206,18 +211,7 @@ const durationText = (raw: number | null | undefined): string => formatDuration(
  */
 
 export default defineComponent({
-  name: 'showList',
-  emits: [
-    'showList',
-    'changeSong',
-    'changeVideo',
-    /** 左上角刷新：歌单列表=重新同步，视频列表=重新搜索 */
-    'refresh',
-    /** 右上角加号：打开「添加视频」 */
-    'addVideo',
-    /** 爱心：收藏 / 取消收藏某个视频 */
-    'toggleFavorite',
-  ],
+  name: 'SongVideoListDialog',
   data() {
     return {
       /** 刷新图标正在转圈（0.5s） */
@@ -245,32 +239,34 @@ export default defineComponent({
       failedCovers: {} as Record<string, boolean>,
     };
   },
-  props: {
-    title: {
-      type: String,
-      default: '',
-      required: true,
+  computed: {
+        playback() {
+      return usePlaybackStore();
     },
-    list: {
-      type: Array as () => ListItem[],
-      required: true,
+    queue() {
+      return useQueueStore();
     },
-    listType: {
-      type: String,
-      default: 'none',
-      required: true,
+    ui() {
+      return useUiStore();
     },
-    currentIndex: {
-      type: Number,
-      default: 0,
+    listType(): ListType {
+      return this.ui.listType;
+    },
+    title(): string {
+      return this.listType === 'list' ? this.queue.listName : this.queue.songName;
+    },
+    list(): ListItem[] {
+      return this.listType === 'list' ? this.queue.songs : this.queue.videoList;
+    },
+    currentIndex(): number {
+      return this.listType === 'list'
+        ? this.queue.currentIndex
+        : this.queue.currentVideoIndex;
     },
     /** 当前这首歌收藏的 bvid 列表（视频列表里显示实心爱心） */
-    favorites: {
-      type: Array as () => string[],
-      default: () => [],
+    favorites(): string[] {
+      return this.queue.favoriteBvids;
     },
-  },
-  computed: {
     isSongList(): boolean {
       return this.listType === 'list';
     },
@@ -388,7 +384,7 @@ export default defineComponent({
      * 左上角刷新
      *
      * 先复位再激活，保证连点也能重新播放转圈动画（CSS 动画靠类名重加才会重播）。
-     * 真正干什么由父组件按列表类型决定。
+     * 真正干什么由 player store 按列表类型决定。
      */
     onRefresh(): void {
       this.spinning = false;
@@ -400,7 +396,7 @@ export default defineComponent({
           this._spinTimer = null;
         }, 500);
       });
-      this.$emit('refresh');
+      void boot.onListRefresh();
     },
     /** 展开搜索框并聚焦（放大镜点一下） */
     openSearch(): void {
@@ -417,16 +413,16 @@ export default defineComponent({
     },
     onItemClick(item: ListItem, index: number) {
       if (this.isSongList) {
-        this.$emit('changeSong', index);
+        void this.playback.changeSong(index);
         this.closeSearch();
         /**
          * 收回搜索后，滚到**刚点的这首**（不是 currentIndex）
          *
          * 踩过两次：
          *  1. 不滚的话，浏览器保住滚动锚点，点的那行被钉在列表顶部，看着像「它变成了第一首」；
-         *  2. 滚 `currentIndex` 也不行 —— 那是父组件的 prop，切歌是异步的，
-         *     这一刻它还是**上一首**的下标，于是滚到了上一首的位置（用户反馈：没滚到正在播的这首）。
-         * 自己点的下标是确定的，直接用它；再补一次延迟滚动，防父组件稍后重渲染把位置带偏。
+         *  2. 滚 `currentIndex` 也不行 —— 切歌是异步的，这一刻 store 里还是
+         *     **上一首**的下标，于是滚到了上一首的位置（用户反馈：没滚到正在播的这首）。
+         * 自己点的下标是确定的，直接用它；再补一次延迟滚动，防稍后重渲染把位置带偏。
          */
         const scrollToPicked = (): void => this.scrollToIndex(index, false);
         void this.$nextTick(() => {
@@ -435,11 +431,11 @@ export default defineComponent({
         });
         return;
       }
-      this.$emit('changeVideo', (item as VideoListItem).bvid, this.title);
+      void this.playback.changeVideo((item as VideoListItem).bvid, this.title);
     },
-    /** el-dialog 关掉时（点空白处 / Esc）通知父组件把 listType 置回 none */
+    /** el-dialog 关掉时（点空白处 / Esc）直接把 store 的 listType 置回 none */
     onVisibleChange(visible: boolean): void {
-      if (!visible) this.$emit('showList', 'none');
+      if (!visible) this.ui.showList('none');
     },
     /** 把第 index 行滚进视野（默认居中、平滑） */
     scrollToIndex(index: number, smooth = true): void {

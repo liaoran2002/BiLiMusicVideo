@@ -1,11 +1,10 @@
 <template>
   <el-dialog
-    :model-value="modelValue"
+    v-model="ui.settingsVisible"
     title="设置"
     width="600px"
     :show-close="false"
     align-center
-    @update:model-value="(v: boolean) => $emit('update:modelValue', v)"
   >
     <div class="st-body">
       <!--
@@ -455,7 +454,7 @@
               <span class="st-tier-del-ask">确认删除？</span>
               <!--
                 确认 / 取消 用**实心按钮**（不带 `text`）
-                
+
                 踩过：原来加了 `text`（文字型按钮），`type="danger"` 只让**文字**变红，
                 而面板底色是半透明玻璃、背后是视频画面 —— 红字常常糊在画面里看不清。
                 实心按钮是"红底白字 / 蓝底白字"，对比度足够，不依赖背景。
@@ -592,6 +591,7 @@ import {
 import type { AppSetting } from '@common/types/app_setting';
 import api from '../api/electron';
 import { useSettingStore } from '../stores/setting';
+import { useUiStore } from '../stores/ui';
 import { parseHexColor } from '../utils/uiTheme';
 
 /** 字节 -> 可读体积 */
@@ -632,10 +632,6 @@ const snapSlider = (v: number | number[], min: number, max: number, step: number
 
 export default defineComponent({
   name: 'SettingsDialog',
-  props: {
-    modelValue: { type: Boolean, default: false },
-  },
-  emits: ['update:modelValue'],
   data() {
     return {
       /** 缓存占用统计 */
@@ -711,6 +707,9 @@ export default defineComponent({
     };
   },
   computed: {
+        ui() {
+      return useUiStore();
+    },
     store() {
       return useSettingStore();
     },
@@ -775,7 +774,7 @@ export default defineComponent({
   },
   watch: {
     // 每次打开时刷新一次占用
-    modelValue(visible: boolean) {
+    'ui.settingsVisible'(visible: boolean) {
       if (visible) {
         void this.refreshCacheStats();
         return;
@@ -797,7 +796,7 @@ export default defineComponent({
     },
   },
   mounted() {
-    if (this.modelValue) void this.refreshCacheStats();
+    if (this.ui.settingsVisible) void this.refreshCacheStats();
   },
   beforeUnmount() {
     /** 组件真被销毁时（App 卸载）也兜一次，别留着 rAF */

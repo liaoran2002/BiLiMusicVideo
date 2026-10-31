@@ -97,8 +97,8 @@
 │       ├── SettingsDialog.vue      # ★ 设置弹窗
 │       ├── AboutDialog.vue         # ★ 关于弹窗（仓库地址 / 作者与 DeepSeek·大肥鱼头像）
 │       ├── AddVideoDialog.vue      # ★ 「添加视频」弹窗（粘贴链接 → 解析 → 收藏）
-│       ├── biliVideoControls.vue   #   播放控制栏
-│       └── showList.vue            #   歌曲/视频列表弹窗（放大镜搜索 / 刷新 / 爱心收藏）
+│       ├── biliVideoControls.vue   #   播放控制栏（直接读写 player）
+│       └── SongVideoListDialog.vue #   歌曲/视频列表弹窗（放大镜搜索 / 刷新 / 爱心收藏）
 ├── scripts/protect.mjs             # ★ 打包保护流水线：字节码 + 混淆 + 资源加密
 ├── index.html / tray-menu.html     # 两个渲染入口
 └── electron.vite.config.ts
@@ -156,6 +156,21 @@ electron/common/types/ipc.ts  IpcChannelMap（频道 → 入参/返回值）
 
 标题栏只保留必要入口，避免按钮堆积：
 
+> **这条标题栏是 `components/AppTitlebar.vue`**（连同缓冲浮层 `BufferOverlay`、
+> 角落按钮 `CornerButtons` 一起从 App.vue 模板里拆出来的）。
+>
+> 重构分三步：拆模板和样式 → 播放状态与方法迁进 `stores/player/` → 组件改为直接
+> `usePlayerStore()`。现在所有组件都**没有 props / emits**：标题栏自己读写壁纸、锁定、
+> 定时和弹窗可见性，控制栏自己调播放 actions，列表弹窗自己读写 `listType`。
+> App.vue 只保留 `<video>` 事件接线和 `attachVideo` / `bootstrap` / `teardown`。
+>
+> 跨模块的 `this.xxx` 没有用 `any` 放宽：`types.ts` 里的 `PlayerActions` / `PlayerGetters`
+> 由各模块用 declaration merging 补签名，模块对象再用 `satisfies ThisType<PlayerContext>`
+> 校验。这样拆文件后，方法名、参数和返回值仍然受 TypeScript 检查。
+>
+> `.wm-hidden`（壁纸模式隐藏）**留在了 App.vue 的全局样式里**：
+> 它同时作用于标题栏和底部的播放控制栏，不是标题栏私有的东西。
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ [☰ 歌单名] │          拖拽区（双击切换最大化）          │ [壁纸] [头像] [设置] [关于] [—][□][×] │
@@ -210,7 +225,7 @@ electron/common/types/ipc.ts  IpcChannelMap（频道 → 入参/返回值）
 Element Plus 的 `close-on-click-modal` 要求 mousedown/mouseup 都落在遮罩上，
 所以**拖滑块时把鼠标甩到弹窗外再松手不会误关**。
 
-歌曲 / 视频列表（`showList.vue`）也从「自己写的 fixed 浮层 + 遮罩」换成了 `el-dialog`：
+歌曲 / 视频列表（`SongVideoListDialog.vue`）也从「自己写的 fixed 浮层 + 遮罩」换成了 `el-dialog`：
 外框（底色 / 圆角 / 模糊 / 白字 + 阴影）复用全局 `.el-dialog` 样式，组件里只管列表内容。
 
 歌单同步策略挂在歌单上而不是全局，是为了避免「明明给歌单设了自动同步，却被全局开关关掉」这种困惑。
@@ -945,9 +960,9 @@ if (this.frozenRemainMs !== null) {    // ← 恢复分支永远走不到
 #### 时长是本地草稿，只有确认才落盘
 
 面板里的时长和三个复选框是**本地 `draft`**，编辑只改 draft，
-点「确认 / 更新定时」才 `emit('apply', {hours, minutes, options})`。
+点「确认 / 更新定时」才调用 `player.applySleepTimer({hours, minutes, options})`。
 
-**这是被逼出来的**：原来编辑时立刻向定时器上报 → 触发 `emit()` →
+**这是被逼出来的**：原来编辑时立刻写回定时器状态 →
 那一刻定时还没启动、`active` 是 false → 而订阅回调里有
 `if (!state.active) 关面板` → **点一下加号弹窗就自己关了**。
 
@@ -975,12 +990,13 @@ if (this.frozenRemainMs !== null) {    // ← 恢复分支永远走不到
 
 #### `el-dialog` 的坑：确认后弹窗不关
 
-面板里 `confirm()` 只 `$emit('apply')`，然后指望父组件把 `sleepPanelVisible` 置 false ——
+早期面板 `confirm()` 只向父组件发 `apply`，然后指望父组件把 `sleepPanelVisible` 置 false ——
 **实测弹窗不会关**（定时确实启动了，框还在）。
-原因是 `v-model="visible"` 绑的是 getter/setter，父组件改值时 setter 又会 emit
+原因是 `v-model` 绑的是父级 getter/setter，父组件改值时 setter 又发
 `update:modelValue` 回来，形成来回覆盖。
 
-修法：面板在 `confirm()` 里**自己先 `this.visible = false`**。
+现在 `v-model` 直接绑 `player.sleepPanelVisible`，`confirm()` 里直接写这个字段，
+没有中间层，不存在覆盖。
 
 > 另外：`el-dialog` 关闭后 **DOM 不移除**，只把 `.el-overlay` 设成 `display: none`。
 > 所以测「弹窗关没关」不能查 DOM 存在性，要看 `overlayDisplay` / `offsetParent`。
@@ -1452,7 +1468,7 @@ targetVideo = { bvid, view_result, playurl_result }   // ← 整个替换
 
 ### 视频列表：刷新 / 收藏 / 添加视频（踩坑记录）
 
-视频列表（`src/components/showList.vue`）现在是一套「候选视频管理」：
+视频列表（`src/components/SongVideoListDialog.vue`）现在是一套「候选视频管理」：
 
 ```
 [刷新]      歌名 / UP 主        []        ← 歌曲列表：右上角是放大镜（点开变输入框）
@@ -2932,7 +2948,7 @@ JS 侧托盘 API 是否暴露图标矩形、`SetParent` 到 WorkerW 后 WebView2
 | 切歌瞬间进度还是上一首的 | `currentTime` / `duration` 未复位 | `changeSong` 里一起复位，`playCurrent` 不会再写错 `resumeTime` |
 | 同步后随机播放可能卡住 | 曲目变了但 `randomList` 没重建，随机下标越界 → `getSongName` 返回 null 静默 return | `reloadCurrentPlaylistSongs` 里 `resetRandomList()` |
 | 编辑「非当前」歌单会把正在听的歌从头重播 | 弹窗保存后无条件发 `switch`，而 App 只看 `currentId` | 弹窗改用 `reload` 事件；App 侧再加一道 `id !== currentId` 的防御 |
-| 封面坏一张，其它歌单同一行永远空白 | `onImgError` 写内联 `display:none`，而列表 `:key` 是 index，DOM 会被复用 | 改成按 URL 记 `failedCovers`（与 `showList` 一致） |
+| 封面坏一张，其它歌单同一行永远空白 | `onImgError` 写内联 `display:none`，而列表 `:key` 是 index，DOM 会被复用 | 改成按 URL 记 `failedCovers`（与 `SongVideoListDialog` 一致） |
 | 改「字体颜色」有些字不变 | 一堆写死的 `#fff` / `rgba(255,255,255,…)` | 全部换成 `--glass-*` / `--panel-*` 或从 `--text-rgb` 派生；新增 `--accent*` 收纳功能色 |
 | **改「控制栏闲置透明度」没反应** | `main.ts` 的 `watch` 数组列了主题色/模糊/阴影，**唯独漏了 `common.idleOpacity`**，而 `uiTheme` 确实会读它写 `--ui-idle-opacity` | 把这个键加进那个数组（数组必须与 `applyUiTheme` 实际读取的键保持一致）|
 | **第二首歌的卡顿恢复比第一首差** | `_stallUrlIndex` / `_stallQualityDrops` 只在 `onVideoLoaded` 复位，而新歌若在 `loadeddata` **之前**就卡住，那次复位不会发生 → 带着上一首的计数：跳过备用源、降清晰度直接判满 | 在 `changeSong` / `clearNowPlaying` / 单曲循环那圈也归零（共 4 处）|

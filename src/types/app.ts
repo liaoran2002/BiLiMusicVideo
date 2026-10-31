@@ -33,7 +33,7 @@ export type VideoControlAction =
 /**
  * B 站搜索结果里的视频项
  *
- * 与 showList 的 VideoListItem 保持结构兼容（bvid/title/pic/author/duration）。
+ * 与 SongVideoListDialog 的 VideoListItem 保持结构兼容（bvid/title/pic/author/duration）。
  */
 export interface BiliVideo {
   bvid: string
@@ -67,6 +67,8 @@ export interface BiliVideo {
 }
 
 export interface AppData {
+  /** <video> 元素 holder（markRaw 包装，不进响应式） */
+  _videoHolder: { el: VideoElement | null }
   // ---- 歌单与播放 ----
   /** 当前歌单的曲目（结构化：含封面 / 专辑 / 歌手） */
   songs: PlaylistSong[]

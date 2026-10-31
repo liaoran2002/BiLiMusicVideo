@@ -1,5 +1,8 @@
 <template>
-  <div id="biliVideoControls">
+  <div
+    id="biliVideoControls"
+    :class="{ 'wm-hidden': window.wallpaperEnabled || window.locked }"
+  >
     <div class="now-playing">
       <!-- 封面：优先歌曲专辑图，退回视频缩略图 -->
       <div class="np-cover">
@@ -36,7 +39,7 @@
           <div class="np-subtitle" :title="subtitle">{{ subtitle }}</div>
           <!--
             清晰度 / 音质角标：贴在这一行最右边，点开可以切换
-            可选档位由父组件从 playurl 响应里取（不同视频、不同账号能选的档位不一样）
+            可选档位由 player store 从 playurl 响应里取（不同视频、不同账号能选的档位不一样）
 
             ⚠️ 切换清晰度**会重新解析播放地址**（发请求）—— 请求进行中禁用（`qualityBusy`），
             而且改完还有 3 秒冷却（防连点）。禁用时 `title` 说明原因。
@@ -46,7 +49,7 @@
             trigger="click"
             placement="top"
             :disabled="qualityBusy"
-            @command="(id: number) => $emit('selectQuality', 'video', id)"
+            @command="(id: number) => playback.switchQuality('video', id)"
           >
             <div class="np-quality" :title="qualityBusy ? '正在加载中，请稍候……' : qualityTitle">
               {{ quality }}<span v-if="videoChoices.length > 1" class="np-caret">▾</span>
@@ -69,7 +72,7 @@
             trigger="click"
             placement="top"
             :disabled="qualityBusy"
-            @command="(id: number) => $emit('selectQuality', 'audio', id)"
+            @command="(id: number) => playback.switchQuality('audio', id)"
           >
             <div class="np-quality" :title="qualityBusy ? '正在加载中，请稍候……' : audioTitle">
               {{ audioQuality }}<span v-if="audioChoices.length > 1" class="np-caret">▾</span>
@@ -121,7 +124,7 @@
           'iconfont',
           listType == 'list' ? 'icon-cuowu' : 'icon-bofangduilie',
         ]"
-        @click="$emit('videoControl', 'list')"
+        @click="playback.videoControl('list')"
         id="list"
       ></i>
       <!-- 视频列表（播放列表） -->
@@ -130,7 +133,7 @@
           'iconfont',
           listType == 'vList' ? 'icon-cuowu' : 'icon-bofangliebiao',
         ]"
-        @click="$emit('videoControl', 'vList')"
+        @click="playback.videoControl('vList')"
         id="vList"
       ></i>
       <!--
@@ -142,18 +145,18 @@
       <i
         :class="['iconfont', 'icon-1_music83', busy ? 'ctrl-disabled' : '']"
         :title="busy ? '正在加载中，请稍候……' : '上一首'"
-        @click="busy ? null : $emit('videoControl', 'before')"
+        @click="busy ? null : playback.videoControl('before')"
         id="before"
       ></i>
       <i
         :class="['iconfont', paused ? 'icon-play' : 'icon-pause']"
-        @click="$emit('videoControl', 'playControls')"
+        @click="playback.videoControl('playControls')"
         id="playControls"
       ></i>
       <i
         :class="['iconfont', 'icon-1_music82', busy ? 'ctrl-disabled' : '']"
         :title="busy ? '正在加载中，请稍候……' : '下一首'"
-        @click="busy ? null : $emit('videoControl', 'next')"
+        @click="busy ? null : playback.videoControl('next')"
         id="next"
       ></i>
       <!--
@@ -216,7 +219,7 @@
               : 'icon-suijibofang'
             : 'icon-liebiaoxunhuan',
         ]"
-        @click="$emit('videoControl', 'playMode')"
+        @click="playback.videoControl('playMode')"
         id="playMode"
       ></i>
     </div>
@@ -228,18 +231,13 @@ import { defineComponent } from 'vue';
 import type { QualityOptionPayload, QualityOptionsPayload } from '@common/types/ipc';
 import { normalizeImageUrl } from '../utils/image';
 import { sanitizeTitleHtml } from '../utils/title';
+import { usePlaybackStore } from '../stores/playback';
+import { useQueueStore } from '../stores/queue';
+import { useUiStore } from '../stores/ui';
+import { useWindowStore } from '../stores/window';
 
 export default defineComponent({
   name: 'biliVideoControls',
-  emits: [
-    'changeVolume',
-    'changeTime',
-    'videoControl',
-    'showList',
-    'toggleMute',
-    /** 用户在角标菜单里选了清晰度（'video'）或音质（'audio'） */
-    'selectQuality',
-  ],
   data() {
     return {
       isVideoDragging: false,
@@ -257,82 +255,17 @@ export default defineComponent({
       coverFailed: false,
     };
   },
-  props: {
-    videoName: { type: String, default: '' },
-    /** 当前封面（歌曲专辑图或视频缩略图） */
-    cover: { type: String, default: '' },
-    /** 副标题：歌曲名 - 歌手 · 专辑 */
-    subtitle: { type: String, default: '' },
-    /** 正在播的视频清晰度标签（例如 1080P / 4K），为空则不显示 */
-    quality: { type: String, default: '' },
-    /** 清晰度 + 分辨率，用于悬浮提示，例如 1080P（1920×1080） */
-    qualityDetail: { type: String, default: '' },
-    /** 正在播的音频流音质（例如 192K），为空则不显示 */
-    audioQuality: { type: String, default: '' },
-    /** 音质悬浮提示，例如 192K 高音质 */
-    audioQualityDetail: { type: String, default: '' },
-    /** 这个视频当前可选的清晰度 / 音质 */
-    qualityOptions: {
-      type: Object as () => QualityOptionsPayload | null,
-      default: null,
-    },
-    /** 当前实际在播的清晰度代码（qn）；durl 时为空 */
-    videoQn: { type: Number as unknown as () => number | null, default: null },
-    /** 当前实际在播的音频流 id；durl 时为空 */
-    audioId: { type: Number as unknown as () => number | null, default: null },
-    currentMode: { type: Number, default: 0 },
-    currentVolume: { type: Number, default: 0 },
-    isMuted: { type: Boolean, default: false },
-    currentTime: { type: Number, default: 0 },
-    duration: { type: Number, default: 0 },
-    paused: { type: Boolean, default: false },
-    listType: { type: String, default: '' },
-    /**
-     * ★ **有网络请求在飞**（搜索 / 解析地址）时为 true
-     *
-     * 用于**禁用所有会再发请求的控件**，防止用户狂点造成请求风暴
-     * （B站会返回 412 风控）。
-     *
-     * ⚠️ 只禁「会发请求的」——播放 / 暂停 / 音量 / 进度这些**本地功能**不禁，
-     * 它们在请求期间照常可用（用户不该因为后台在搜歌就不能暂停）。
-     *
-     * 会发请求的有：切歌（上一首 / 下一首）、清晰度 / 音质切换、播放模式
-     * （换模式可能重新解析地址）。
-     * 不该禁的有：播放/暂停、静音、音量、进度条、两个列表开关（纯本地展开收起）。
-     */
-    busy: { type: Boolean, default: false },
-    /**
-     * ★ **清晰度 / 音质下拉是否该禁用**
-     *
-     * 比 `busy` 多一个来源：**刚改过清晰度/音质的 3 秒冷却**
-     * （见 App.vue 的 `startQualityCooldown`）。
-     *
-     * 为什么不干脆用 `busy`：切歌按钮没必要因为「刚改过清晰度」被禁 3 秒 ——
-     * 冷却只针对「再改一次清晰度」这个动作。
-     */
-    qualityBusy: { type: Boolean, default: false },
-  },
   methods: {
     formatTime(s: number): string {
-      s = Math.floor(s || 0);
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = s % 60;
-      const p = (n: number): string => (n < 10 ? '0' + n : String(n));
-      return h > 0 ? `${p(h)}:${p(m)}:${p(sec)}` : `${p(m)}:${p(sec)}`;
+      return this.playback.formatTime(s);
     },
     /**
      * 静音按钮
      *
-     * 这里只负责「上报用户按了静音」，具体是静音还是恢复、
-     * 恢复到多少音量，都交给父组件决定 —— 因为音量状态的权威在 App 那边。
-     *
-     * 之前这里用 draggingVolume 当「静音前的音量」暂存：
-     * 但 draggingVolume 只在拖动音量条时才被赋值，点击静音时它还是初始值 0，
-     * 于是「解除静音」恢复的音量是 0，音量永远回不来，静音状态也卡死。
+     * 静音 / 恢复到多少音量由 player store 决定；组件不保存音量权威值。
      */
     toggleMute() {
-      this.$emit('toggleMute');
+      this.playback.toggleMute();
     },
     onProgressDown(e: PointerEvent) {
       this.isVideoDragging = true;
@@ -363,9 +296,9 @@ export default defineComponent({
         100,
         Math.max(0, this.currentVolume + (e.deltaY < 0 ? step : -step)),
       );
-      // 已经 0 / 100：照样 preventDefault（别让滚轮漏到页面去），但不白发一次事件
+      // 已经 0 / 100：照样 preventDefault（别让滚轮漏到页面去），但不白发一次更新
       if (next === this.currentVolume) return;
-      this.$emit('changeVolume', next);
+      this.playback.changeVolume(next);
     },
     onPointerMove(e: PointerEvent) {
       if (this.isVideoDragging) this.calcProgress(e);
@@ -405,7 +338,7 @@ export default defineComponent({
       const rect = el.getBoundingClientRect();
       const pos = Math.min(Math.max(0, (e.clientX - rect.left) / rect.width), 1);
       this.draggingTime = pos * this.duration;
-      this.$emit('changeTime', this.draggingTime);
+      this.playback.changeTime(this.draggingTime);
     },
     calcVolume(e: PointerEvent) {
       const el =
@@ -416,10 +349,83 @@ export default defineComponent({
       const y = rect.bottom - e.clientY;
       const pct = Math.min(Math.max(0, y / rect.height), 1);
       this.draggingVolume = Math.round(pct * 100);
-      this.$emit('changeVolume', this.draggingVolume);
+      this.playback.changeVolume(this.draggingVolume);
     },
   },
   computed: {
+        playback() {
+      return usePlaybackStore();
+    },
+    queue() {
+      return useQueueStore();
+    },
+    ui() {
+      return useUiStore();
+    },
+    window() {
+      return useWindowStore();
+    },
+    videoName(): string {
+      return this.playback.videoName || this.queue.songName;
+    },
+    /** 当前封面（歌曲专辑图或视频缩略图） */
+    cover(): string {
+      return this.playback.currentCover() || '';
+    },
+    /** 副标题：歌曲名 - 歌手 · 专辑 */
+    subtitle(): string {
+      return this.playback.controlsSubtitle;
+    },
+    quality(): string {
+      return this.playback.videoQuality;
+    },
+    qualityDetail(): string {
+      return this.playback.videoQualityDetail;
+    },
+    audioQuality(): string {
+      return this.playback.audioQuality;
+    },
+    audioQualityDetail(): string {
+      return this.playback.audioQualityDetail;
+    },
+    qualityOptions(): QualityOptionsPayload | null {
+      return this.playback.qualityOptions;
+    },
+    videoQn(): number | null {
+      return this.playback.currentVideoQn;
+    },
+    audioId(): number | null {
+      return this.playback.currentAudioId;
+    },
+    currentMode(): number {
+      return this.playback.currentMode;
+    },
+    currentVolume(): number {
+      return this.playback.currentVolume;
+    },
+    isMuted(): boolean {
+      return this.playback.isMuted;
+    },
+    currentTime(): number {
+      return this.playback.currentTime;
+    },
+    duration(): number {
+      return this.playback.duration;
+    },
+    paused(): boolean {
+      return this.playback.paused;
+    },
+    listType(): string {
+      return this.ui.listType;
+    },
+    /** 有网络请求在飞：禁用会再发请求的控件，防止 412 风控 */
+    busy(): boolean {
+      return this.ui.netBusy;
+    },
+    /** 请求中或刚改过清晰度/音质的 3 秒冷却里禁用下拉 */
+    qualityBusy(): boolean {
+      return this.ui.qualityBusy;
+    },
     /**
      * 跑马灯标题（净化过的 HTML）
      *

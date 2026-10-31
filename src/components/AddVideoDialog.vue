@@ -8,11 +8,10 @@
     流程：粘贴链接 / BV 号 -> 解析 -> 看到封面 + 标题 + UP 主 -> 确认 -> 加到这首歌的收藏里
   -->
   <el-dialog
-    :model-value="modelValue"
+    v-model="ui.addVideoVisible"
     width="560px"
     :show-close="false"
     align-center
-    @update:model-value="(v: boolean) => $emit('update:modelValue', v)"
   >
     <template #header>
       <div class="av-head">添加视频</div>
@@ -79,13 +78,11 @@ import { ElMessage } from 'element-plus';
 import type { ParsedVideoInfo } from '@common/types/ipc';
 import api from '../api/electron';
 import { normalizeImageUrl } from '../utils/image';
+import { useQueueStore } from '../stores/queue';
+import { useUiStore } from '../stores/ui';
 
 export default defineComponent({
   name: 'AddVideoDialog',
-  props: {
-    modelValue: { type: Boolean, default: false },
-  },
-  emits: ['update:modelValue', 'confirm'],
   data() {
     return {
       input: '',
@@ -99,12 +96,18 @@ export default defineComponent({
     };
   },
   computed: {
+        queue() {
+      return useQueueStore();
+    },
+    ui() {
+      return useUiStore();
+    },
     coverUrl(): string | null {
       return normalizeImageUrl(this.info?.pic ?? null);
     },
   },
   watch: {
-    modelValue(v: boolean) {
+    'ui.addVideoVisible'(v: boolean) {
       // 每次打开都是一张干净的空白表单；关闭时丢掉上次的结果
       if (v) {
         this.input = '';
@@ -154,11 +157,11 @@ export default defineComponent({
     },
     confirm(): void {
       if (!this.info) return;
-      this.$emit('confirm', this.info);
+      void this.queue.onAddVideo(this.info);
       this.close();
     },
     close(): void {
-      this.$emit('update:modelValue', false);
+      this.ui.addVideoVisible = false;
     },
   },
 });

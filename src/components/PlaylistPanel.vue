@@ -6,7 +6,7 @@
     原来这里还有个快捷下拉菜单，已经去掉 —— 两套入口容易状态打架，而且用户点开只为了进管理。
     hover 表现和标题栏其它按钮一致：只换背景，不动透明度。
   -->
-  <div class="pl-trigger" title="歌单管理" @click="$emit('manage')">
+  <div class="pl-trigger" title="歌单管理" @click="ui.playlistManagerVisible = true">
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
       <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
     </svg>
@@ -17,11 +17,14 @@
 <script lang="ts">
 import { defineComponent } from 'vue';
 import { usePlaylistStore } from '../stores/playlists';
+import { useUiStore } from '../stores/ui';
 
 export default defineComponent({
   name: 'PlaylistPanel',
-  emits: ['manage'],
   computed: {
+        ui() {
+      return useUiStore();
+    },
     playlistsStore() {
       return usePlaylistStore();
     },

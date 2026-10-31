@@ -6,12 +6,11 @@
     提示「点击空白位置关闭」由 App.vue 里遮罩的 ::after 统一提供。
   -->
   <el-dialog
-    :model-value="modelValue"
+    v-model="ui.aboutVisible"
     title="关于"
     width="440px"
     :show-close="false"
     align-center
-    @update:model-value="(v: boolean) => $emit('update:modelValue', v)"
   >
     <div class="ab-body">
       <div class="ab-avatars">
@@ -44,6 +43,7 @@
 import { defineComponent } from 'vue';
 import { ElMessage } from 'element-plus';
 import api from '../api/electron';
+import { useUiStore } from '../stores/ui';
 
 /**
  * 仓库地址
@@ -55,10 +55,11 @@ const REPO_URL = 'https://github.com/liaoran2002/BiLiMusicVideo';
 
 export default defineComponent({
   name: 'AboutDialog',
-  props: {
-    modelValue: { type: Boolean, default: false },
+  computed: {
+        ui() {
+      return useUiStore();
+    },
   },
-  emits: ['update:modelValue'],
   data() {
     return {
       devAvatar: new URL('../assets/avatar.jpg', import.meta.url).href,

@@ -818,11 +818,65 @@ channel → `{params, result}` 的契约集中在这里，
 
 ## 4. 渲染层（src/）
 
-### `App.vue` —— ★ 界面中枢
+### `App.vue` —— 界面装配入口
 
-**职责**：模板 + **全部播放业务**。是最大的文件，也是所有状态的权威。
+**职责**：模板装配、全局样式，以及播放器 store 的挂载 / 卸载接线；不再持有播放业务状态或方法。
 
-**按功能域分段**：
+> 原来的 4540 行中枢已经拆成两层：标题栏 `AppTitlebar`、缓冲浮层 `BufferOverlay`、
+> 角落按钮 `CornerButtons` 负责各自 UI；全部播放状态与业务方法迁到 `stores/player/`。
+> App.vue 现在 292 行，模板只负责摆放组件与 `<video>`；子组件全部直接读写 Pinia，
+> App 不再向它们传 props 或监听 emit。
+>
+> `<video>` 仍留在本文件。挂载时先 `attachVideo()` 把元素注入 store，再 `bootstrap()`；
+> 卸载时先 `teardown()` 清理 MSE、预热流与监听，再释放元素。顺序不能反。
+
+### `stores/player/` —— ★ 播放状态与业务中枢
+
+**职责**：原 App.vue 的 117 个状态字段、17 个计算属性和 119 个业务方法，
+另加 `attachVideo` / `bootstrap` / `teardown` 三个生命周期动作，共 **122 个 actions**。
+`index.ts` 只是聚合入口，对外仍然只有一个 `usePlayerStore()`。
+
+**文件划分**：
+
+| 文件 | 行数 | 职责 |
+| :--- | ---: | :--- |
+| `index.ts` | 42 | 聚合 state / getters / 10 组 actions，导出 `usePlayerStore` |
+| `state.ts` | 276 | 原 `AppData` 初始状态 + `_videoHolder` / `_stopWatchers` |
+| `getters.ts` | 175 | 19 个 getters（含 `settingStore` / `playlistsStore` 引用） |
+| `constants.ts` | 67 | 缓冲、卡顿、冷却、预热阈值，由各 actions 共享 |
+| `types.ts` | 18 | `PlayerState`、`PlayerActions`、`PlayerGetters`、`PlayerContext` |
+| `actions/network.ts` | 249 | 10 个：网络计数器、错误文案、空结果与忙碌提示 |
+| `actions/session.ts` | 607 | 22 个：启动、同步、续播、登录、壁纸、歌单切换 |
+| `actions/window.ts` | 349 | 15 个：窗口、定时暂停、拖动、全屏、锁定、快捷键 |
+| `actions/stream.ts` | 734 | 20 个：缓冲、片尾/停滞看门狗、换源、视频事件 |
+| `actions/prefetch.ts` | 325 | 9 个：下一首/上一首搜索、媒体预热与清理 |
+| `actions/controls.ts` | 137 | 7 个：控制栏动作、进度、音量、静音 |
+| `actions/playback.ts` | 695 | 11 个：切歌、视频解析、清晰度切换、dash、封面 |
+| `actions/library.ts` | 309 | 13 个：视频列表、收藏、添加视频、上一首/下一首 |
+| `actions/media.ts` | 273 | 12 个：MediaSession、任务栏、音频设备、托盘状态 |
+| `actions/lifecycle.ts` | 351 | 3 个：video 注入、启动订阅、完整清理 |
+
+**为什么是 122 而不是 119**：早先按正则统计漏掉了泛型方法 `withNet<T>` 和两个
+以 `function` 属性形式定义的节流包装，按 TypeScript AST 重新核对后是 122。
+
+**拆开后怎么保住 `this` 类型**：
+
+- `types.ts` 定义 `PlayerState` 和两个空接口 `PlayerActions` / `PlayerGetters`。
+- 每个 actions 模块用 `declare module '../types'` 声明自己那几个方法的签名，
+  getters 模块同样补全计算属性签名。
+- 模块对象用 `satisfies ThisType<PlayerContext>` 校验 `this`，但不抹掉对象自身推导出的成员类型。
+- 所以跨模块的 `this.changeSong()`、`this.currentSong` 仍然有方法名、参数和返回值检查，
+  **没有用 `[key: string]: any` 换拆分**。
+
+**保留的 Pinia Options 约定**：
+
+- 使用 **Pinia Options store**，保留原有 `this.xxx` 调用方式，避免把迁移变成全量重写。
+- `<video>` 放在 `markRaw` 包装的 `_videoHolder` 中，DOM 节点不进入响应式系统。
+- `settingStore` / `playlistsStore` 通过 getters 复用现有 Pinia 单例，不在 state 里复制实例。
+- Element Plus 消息、确认框和通知改为函数式调用；`$nextTick` 改为 Vue 的 `nextTick()`。
+- 原 mounted / beforeUnmount 与三个 watch 统一归入 `bootstrap()` / `teardown()`。
+
+**播放业务按功能域分段**：
 
 | 域 | 关键内容 |
 | :--- | :--- |
@@ -839,7 +893,7 @@ channel → `{params, result}` 的契约集中在这里，
 | 壁纸模式 | `.wm-hidden`（class 不用 v-if）+ 进壁纸关所有弹窗 |
 | 界面锁定 | `locked` + `_lockedByFullscreen` |
 | 快捷键 | Space / ↑↓ / ←→ / F / S / Esc |
-| 托盘事件 | 17 个监听全部存进 data 并在 `beforeUnmount` 摘除 |
+| 托盘事件 | 解绑函数集中保存，并在 `teardown()` 中统一摘除 |
 | 收藏 / 添加视频 | `onAddVideo` **复用 `setFavorite`** |
 
 **关键设计（几处「先做/不能做」）**：
@@ -878,26 +932,32 @@ channel → `{params, result}` 的契约集中在这里，
 
 | 文件 | 职责 |
 | :--- | :--- |
-| `biliVideoControls.vue` | 播放控制栏（17 props / 6 emits，**纯展示 + 上报**） |
-| `SettingsDialog.vue` | 设置弹窗（**左栏目录 + 右栏一页到底**） |
-| `SleepTimerPanel.vue` | 定时暂停弹窗（时长草稿 + 三个复选框，**只有确认才上报**） |
-| `PlaylistManager.vue` | 歌单管理（左列表 + 右「内联表单 / 曲目列表」）；**只做展示与原样透传**，见下 |
-| `showList.vue` | 歌曲列表 / 视频列表**双形态**弹层（按 `listType` 切换） |
-| `AddVideoDialog.vue` | 「添加视频」弹窗（粘贴链接 → 解析 → 收藏） |
-| `AboutDialog.vue` | 关于弹窗 |
-| `PlaylistPanel.vue` | 左上角歌单入口 |
+| `biliVideoControls.vue` | 播放控制栏；直接读 player 的播放状态，动作直接调 player actions |
+| `SettingsDialog.vue` | 设置弹窗（**左栏目录 + 右栏一页到底**）；可见性直接绑 `player.settingsVisible` |
+| `SleepTimerPanel.vue` | 定时暂停弹窗（时长草稿 + 三个复选框）；确认后直接调 `player.applySleepTimer` |
+| `PlaylistManager.vue` | 歌单管理（左列表 + 右「内联表单 / 曲目列表」）；直接调用 player / playlist 两个 store |
+| `SongVideoListDialog.vue` | 歌曲 / 视频列表**双形态**弹层（按 `player.listType` 切换） |
+| `AddVideoDialog.vue` | 「添加视频」弹窗（粘贴链接 → 解析 → 直接调 `player.onAddVideo`） |
+| `AboutDialog.vue` | 关于弹窗；可见性直接绑 `player.aboutVisible` |
+| `PlaylistPanel.vue` | 左上角歌单入口（由 `AppTitlebar` 内部使用，点击直接打开 player 的歌单管理弹窗） |
+| `AppTitlebar.vue` | 整条标题栏：歌单入口 + 拖拽区 + 定时/壁纸/头像/设置/关于/窗口按钮；直接读写 player |
+| `BufferOverlay.vue` | 缓冲浮层（圆环 + 百分比 + 副标题），数据全部来自 player getters |
+| `CornerButtons.vue` | 右下全屏 + 左下锁定；直接读写 player |
+
+> **组件层已经全部改为直接使用 Pinia**：没有任何组件的 `props` / `emits`，
+> `App.vue` 只保留 `<video>` 事件接线和 `attachVideo` / `bootstrap` / `teardown`。
+> 弹窗开关、列表内容、播放动作都由组件自己从 store 读写，不再经过父组件转手。
 
 **`SleepTimerPanel.vue` 的关键设计**：
 
-- **`el-dialog` + `v-model`**，和歌单管理 / 设置同一套形态（不是锚点面板）。
+- **`el-dialog` + `v-model`**，可见性直接绑 `player.sleepPanelVisible`。
 - **时长与三个复选框是本地 `draft`**，编辑只改草稿，点「确认 / 更新定时」才
-  `emit('apply', {hours, minutes, options})`。这是被逼出来的：原来编辑时立刻
-  向定时器上报 → 定时器 `emit()` → 那时还没启动、`active` 为 false →
+  调用 `player.applySleepTimer({hours, minutes, options})`。这是被逼出来的：
+  原来编辑时立刻写回定时器状态 → 那时定时还没启动、`active` 为 false →
   订阅回调里的「没在倒计时就关面板」直接生效，**点一下加号弹窗就自己关了**。
   （定时器上那个「实时同步选项」的方法**零调用，已删** —— 见第 12 节的说明。）
-- **`confirm()` / `onCancel()` 里要自己先置 `visible = false`**：
-  只 emit 给父组件、指望它改 `sleepPanelVisible` 的话**弹窗不会关**
-  （`v-model` 是 getter/setter，父组件改值时 setter 又 emit 回来形成来回覆盖）。
+- **`confirm()` / `onCancel()` 里直接写 `player.sleepPanelVisible = false`**：
+  不再由父组件转一道手，也不存在 getter/setter 来回覆盖的问题。
 - **时/分用 `el-input-number`（`:controls="false"`）**，可以直接打字 ——
   要 59 分钟不该按 59 下加号。`+` / `−` 保留做微调，并且**分满 60 进一位到小时**
   （59 点 `+` → 时 +1、分变 0；0 点 `−` → 时 −1、分变 59）。
@@ -1994,23 +2054,22 @@ apply 相撞时，两次 apply 会交错 —— 先进壁纸那次在 attach 前
 | :--- | :--- | :--- | :--- |
 | `common.idleOpacity`（控制栏闲置透明度） | **百分比 0-100**（步进 **10**） | `src/utils/uiTheme.ts` → `--ui-idle-opacity`（**除 100**，`opacity` 收小数） | 只管**闲置态**；悬停时 CSS 写死 `opacity: 1`（`biliVideoControls.vue`）。与 `glassTransparency` 是两回事：那个管玻璃**底色**、悬停前后都一样 |
 | `common.autoLaunch`（开机自动启动） | 布尔，默认 `false` | 系统启动项（`app.setLoginItemSettings`） | **不落 CSS**；每次启动重写一遍（便携版挪位置后能自动纠正）；开发模式强制关 |
-| `player.autoDowngradeOnStall`（卡顿自动降低清晰度） | 布尔，默认 `false` | **不落 CSS**，只在 `App.vue` 的 `recoverFromStall` 里读 | **只管「降清晰度」那一步**；换备用源 / 降 durl 始终自动做。关着时提示「建议降到 XXX」而不是硬降 |
+| `player.autoDowngradeOnStall`（卡顿自动降低清晰度） | 布尔，默认 `false` | **不落 CSS**，只在 `stores/player/actions/stream.ts` 的 `recoverFromStall` 里读 | **只管「降清晰度」那一步**；换备用源 / 降 durl 始终自动做。关着时提示「建议降到 XXX」而不是硬降 |
 
 ## 12. 定时暂停 / 定时关闭
 
 **位置**：`src/utils/sleepTimer.ts`（逻辑）+ `src/components/SleepTimerPanel.vue`（弹窗）
-+ `App.vue`（接线）。主进程只提供 `win:quit`。
++ `stores/player/actions/window.ts`（`applySleepTimer` 等）。主进程只提供 `win:quit`。
 
 **数据流**：
 
 ```
-标题栏「定时」按钮 → sleepPanelVisible = true
+标题栏「定时」按钮 → player.sleepPanelVisible = true
         ↓
 弹窗里编辑【本地草稿】：draftHours / draftMinutes / draftOptions
         ↓ 点「确认 / 更新定时」
-emit('apply', { hours, minutes, options })
+player.applySleepTimer({ hours, minutes, options })
         ↓
-App.vue 的 applySleepTimer(payload)
   ├─ settingStore.update(三个 settings 键)     ← 记住，下次打开直接显示
   └─ sleepTimer.start(h, m, options)          ← 启动倒计时
         ↓
@@ -2043,11 +2102,11 @@ handlers.quit()   → electronApi.winQuit()    ← 勾了「关闭程序」
 
 **★ 面板是「草稿模式」，定时器那边没有 `setOptions()`**：
 
-编辑时只改本地 `draftXxx`，**点「确认 / 更新定时」才 `emit('apply')` 上报一次**。
+编辑时只改本地 `draftXxx`，**点「确认 / 更新定时」才调用 `player.applySleepTimer` 一次**。
 定时器上曾经有个 `setOptions()`（实时同步选项）但**从未被调用**，已删 ——
 留着它的注释会让人以为选项是实时生效的。
 
-> 为什么改成草稿：编辑时若立刻上报 → 触发定时器 `emit()` → 那一刻定时还没启动，
+> 为什么改成草稿：编辑时若立刻写回定时器状态 → 那一刻定时还没启动，
 > 之前按 `active` 判断就会「点一下加号弹窗就关了」。
 
 **`0 时 0 分` 时未定时的「确认」按钮是禁用的**：否则会走到
@@ -2173,10 +2232,11 @@ electron-builder（asar）→ 打包 out/
 
 ```
 ┌─────────────────────────── 渲染进程（src/） ───────────────────────────┐
-│  App.vue（中枢：播放业务 + 全部状态）                                   │
-│    ├── components/  纯展示 + $emit 上报（不持有业务状态）                │
-│    ├── stores/      Pinia 副本（不持久化）                              │
-│    └── utils/       dashPlayer / uiTheme / image / title / plain        │
+│  App.vue（组件装配 + 全局样式 + 挂载 / 卸载接线）                       │
+│    ├── components/      各自 usePlayerStore，直接读写（无 props / emits） │
+│    ├── stores/player/   state + getters + 10 组 actions（Options store） │
+│    ├── stores/          setting / playlists 等 Pinia 单例（不持久化）    │
+│    └── utils/           dashPlayer / uiTheme / image / title / plain    │
 └───────────────────────────────┬────────────────────────────────────────┘
                                 │ window.electronAPI（preload 类型化）
 ┌───────────────────────────────┴────────────────────────────────────────┐
@@ -2197,6 +2257,11 @@ electron-builder（asar）→ 打包 out/
    5 表 + 1 视图           temp + rename            或便携版 exe 同级 blmvdata/
                                                       （portable.ts 决定）
 ```
+
+> 渲染层 `components/` 所有组件都直接 `usePlayerStore()`：标题栏、控制栏、列表弹窗、
+> 设置 / 歌单 / 定时等弹窗自己读写状态，不再由 App.vue 转 props / emit。
+> App.vue 只保留 `<video>` 事件接线和 store 的挂载 / 卸载。播放方法与状态统一在
+> `stores/player/`，所有组件共享同一个 Pinia 单例。
 
 **两级 id 是数据的骨架**（都由主进程拼，渲染层只做透传）：
 

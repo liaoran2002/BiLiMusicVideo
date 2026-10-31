@@ -1,10 +1,9 @@
 <template>
   <el-dialog
-    v-model="visible"
+    v-model="ui.playlistManagerVisible"
     width="960px"
     :show-close="false"
     align-center
-    @update:model-value="onVisibleChange"
   >
     <template #header>
       <div class="plm-head">
@@ -240,6 +239,9 @@ import { parseCacheKey } from '@common/types/playlist';
 import { formatDuration } from '@common/utils/duration';
 import api from '../api/electron';
 import { usePlaylistStore } from '../stores/playlists';
+import { boot } from '../stores/bootstrap';
+import { useQueueStore } from '../stores/queue';
+import { useUiStore } from '../stores/ui';
 import { normalizeImageUrl } from '../utils/image';
 
 interface Row {
@@ -259,14 +261,6 @@ const pad = (n: number): string => (n < 10 ? `0${n}` : String(n));
 
 export default defineComponent({
   name: 'PlaylistManager',
-  props: {
-    modelValue: { type: Boolean, default: false },
-    /** 当前播放歌单的 id（用于高亮「当前」） */
-    currentPlaylistId: { type: String, default: '' },
-    /** 当前播放到第几首（仅当展示的是当前歌单时有意义） */
-    currentIndex: { type: Number, default: -1 },
-  },
-  emits: ['update:modelValue', 'switch', 'play', 'reload'],
   data() {
     return {
       SYNC_INTERVAL_OPTIONS,
@@ -288,16 +282,14 @@ export default defineComponent({
     };
   },
   computed: {
+    queue() {
+      return useQueueStore();
+    },
+    ui() {
+      return useUiStore();
+    },
     store() {
       return usePlaylistStore();
-    },
-    visible: {
-      get(): boolean {
-        return this.modelValue;
-      },
-      set(v: boolean) {
-        this.$emit('update:modelValue', v);
-      },
     },
     totalSongs(): number {
       return this.store.playlists.reduce((s, p) => s + p.songs.length, 0);
@@ -319,7 +311,7 @@ export default defineComponent({
     },
   },
   watch: {
-    modelValue(v: boolean) {
+    'ui.playlistManagerVisible'(v: boolean) {
       if (v) this.onOpen();
     },
   },
@@ -334,9 +326,6 @@ export default defineComponent({
       if (!exists) {
         this.selectedId = this.store.currentId || this.store.playlists[0]?.id || '';
       }
-    },
-    onVisibleChange(v: boolean) {
-      this.$emit('update:modelValue', v);
     },
     onImgError(e: Event) {
       /**
@@ -366,7 +355,7 @@ export default defineComponent({
     isPlayingRow(row: Row): boolean {
       // 只有展示的是「当前播放歌单」时才高亮当前曲
       if (this.selected?.id !== this.store.currentId) return false;
-      return row.index === this.currentIndex;
+      return row.index === this.queue.currentIndex;
     },
     sourceLabel(source: string): string {
       return SOURCE_LABELS[source] ?? source;
@@ -508,7 +497,7 @@ export default defineComponent({
            * 并从头重播，用户只是改个名字/同步一下，正在听的歌不该被打回 0 秒。
            * 所以这里改成发一个只刷新的事实：调用方按 currentId 判断。
            */
-          if (editedId === this.store.currentId) this.$emit('reload');
+          if (editedId === this.store.currentId) void boot.reloadCurrentPlaylistSongs();
         } else {
           const created = await this.store.addPlaylist({
             name: finalName,
@@ -522,7 +511,7 @@ export default defineComponent({
           });
           ElMessage.success(`歌单《${finalName}》已添加`);
           this.selectedId = created.id;
-          this.$emit('switch', created.id);
+          void boot.onPlaylistSwitch(created.id);
         }
         this.editing = false;
         this.editingId = '';
@@ -574,7 +563,7 @@ export default defineComponent({
         return;
       }
       ElMessage.success(`已切换为《${item.name}》`);
-      this.$emit('switch', item.id);
+      void boot.onPlaylistSwitch(item.id);
     },
     async remove(item: PlaylistRecord) {
       const wasCurrent = item.id === this.store.currentId;
@@ -588,18 +577,18 @@ export default defineComponent({
       if (this.selectedId === item.id) {
         this.selectedId = this.store.currentId || this.store.playlists[0]?.id || '';
       }
-      // 删掉的正好是当前歌单 -> 外面得换歌继续放；删的是别的歌单则只刷新，别打断正在听的
-      if (wasCurrent) this.$emit('switch', this.store.currentId);
-      else this.$emit('reload');
+      // 删掉的正好是当前歌单 -> 换歌继续放；删的是别的歌单则只刷新，别打断正在听的
+      if (wasCurrent) void boot.onPlaylistSwitch(this.store.currentId);
+      else void boot.reloadCurrentPlaylistSongs();
     },
     /** 点歌单里的某首歌：切到该歌单并播放 */
     async play(index: number) {
       if (!this.selected) return;
       if (this.selected.id !== this.store.currentId) {
         await this.store.setCurrent(this.selected.id);
-        this.$emit('switch', this.selected.id);
+        void boot.onPlaylistSwitch(this.selected.id);
       }
-      this.$emit('play', index);
+      void boot.onPlayFromManager(index);
     },
     // #endregion
   },
